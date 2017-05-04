@@ -2,16 +2,17 @@
 
 import angular from 'angular';
 import $ from 'jquery';
+import _ from 'lodash';
+import Drop from 'tether-drop';
 
 var module = angular.module('grafana.directives');
 
 var panelTemplate = `
   <div class="panel-container">
     <div class="panel-header">
-      <span class="alert-error panel-error small pointer" ng-if="ctrl.error" ng-click="ctrl.openInspector()">
-        <span data-placement="top" bs-tooltip="ctrl.error">
-          <i class="fa fa-exclamation"></i><span class="panel-error-arrow"></span>
-        </span>
+      <span class="panel-info-corner">
+        <i class="fa"></i>
+        <span class="panel-info-corner-inner"></span>
       </span>
 
       <span class="panel-loading" ng-show="ctrl.loading">
@@ -56,7 +57,7 @@ var panelTemplate = `
   </div>
 `;
 
-module.directive('grafanaPanel', function($rootScope) {
+module.directive('grafanaPanel', function($rootScope, $document) {
   return {
     restrict: 'E',
     template: panelTemplate,
@@ -64,12 +65,14 @@ module.directive('grafanaPanel', function($rootScope) {
     scope: { ctrl: "=" },
     link: function(scope, elem) {
       var panelContainer = elem.find('.panel-container');
+      var cornerInfoElem = elem.find('.panel-info-corner');
       var ctrl = scope.ctrl;
+      var infoDrop;
 
       // the reason for handling these classes this way is for performance
       // limit the watchers on panels etc
-      var transparentLastState;
-      var lastHasAlertRule;
+      var transparentLastState = false;
+      var lastHasAlertRule = false;
       var lastAlertState;
       var hasAlertRule;
       var lastHeight = 0;
@@ -89,6 +92,12 @@ module.directive('grafanaPanel', function($rootScope) {
         ctrl.calculatePanelHeight();
         panelContainer.css({minHeight: ctrl.containerHeight});
         lastHeight = ctrl.containerHeight;
+      }
+
+      // set initial transparency
+      if (ctrl.panel.transparent) {
+        transparentLastState = true;
+        panelContainer.addClass('panel-transparent', true);
       }
 
       ctrl.events.on('render', () => {
@@ -133,11 +142,70 @@ module.directive('grafanaPanel', function($rootScope) {
         }
       }, scope);
 
+      function updatePanelCornerInfo() {
+        var cornerMode = ctrl.getInfoMode();
+        cornerInfoElem[0].className = 'panel-info-corner panel-info-corner--' + cornerMode;
+
+        if (cornerMode) {
+          if (infoDrop) {
+            infoDrop.destroy();
+          }
+
+          infoDrop = new Drop({
+            target: cornerInfoElem[0],
+            content: function() {
+              return ctrl.getInfoContent({mode: 'tooltip'});
+            },
+            classes: ctrl.error ? 'drop-error' : 'drop-help',
+            openOn: 'hover',
+            hoverOpenDelay: 100,
+            tetherOptions: {
+              attachment: 'bottom left',
+              targetAttachment: 'top left',
+              constraints: [
+                {
+                  to: 'window',
+                  attachment: 'together',
+                  pin: true
+                }
+              ],
+            }
+          });
+        }
+      }
+
+      scope.$watchGroup(['ctrl.error', 'ctrl.panel.description'], updatePanelCornerInfo);
+      scope.$watchCollection('ctrl.panel.links', updatePanelCornerInfo);
+
+      cornerInfoElem.on('click', function() {
+        infoDrop.close();
+        scope.$apply(ctrl.openInspector.bind(ctrl));
+      });
+
       elem.on('mouseenter', mouseEnter);
       elem.on('mouseleave', mouseLeave);
 
+      ctrl.isPanelVisible = function () {
+        var position = panelContainer[0].getBoundingClientRect();
+        return (0 < position.top) && (position.top < window.innerHeight);
+      };
+
+      const refreshOnScroll = function () {
+        if (ctrl.skippedLastRefresh) {
+          ctrl.refresh();
+        }
+      };
+
+      $document.on('scroll', refreshOnScroll);
+
       scope.$on('$destroy', function() {
         elem.off();
+        cornerInfoElem.off();
+        $document.off('scroll', refreshOnScroll);
+
+        if (infoDrop) {
+          infoDrop.destroy();
+        }
       });
     }
   };
@@ -146,7 +214,7 @@ module.directive('grafanaPanel', function($rootScope) {
 module.directive('panelResizer', function($rootScope) {
   return {
     restrict: 'E',
-    template: '<span class="resize-panel-handle fa fa-signal"></span>',
+    template: '<span class="resize-panel-handle icon-gf icon-gf-grabber"></span>',
     link: function(scope, elem) {
       var resizing = false;
       var lastPanel;
@@ -223,6 +291,21 @@ module.directive('panelResizer', function($rootScope) {
         elem.off('mousedown', dragStartHandler);
         unbind();
       });
+    }
+  };
+});
+
+module.directive('panelHelpCorner', function($rootScope) {
+  return {
+    restrict: 'E',
+    template: `
+      <span class="alert-error panel-error small pointer" ng-if="ctrl.error" ng-click="ctrl.openInspector()">
+        <span data-placement="top" bs-tooltip="ctrl.error">
+          <i class="fa fa-exclamation"></i><span class="panel-error-arrow"></span>
+        </span>
+      </span>
+    `,
+    link: function(scope, elem) {
     }
   };
 });

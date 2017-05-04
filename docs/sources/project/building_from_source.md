@@ -13,8 +13,8 @@ dev environment. Grafana ships with its own required backend server; also comple
 
 ## Dependencies
 
-- [Go 1.7](https://golang.org/dl/)
-- [NodeJS](https://nodejs.org/download/)
+- [Go 1.8.1](https://golang.org/dl/)
+- [NodeJS LTS](https://nodejs.org/download/)
 
 ## Get Code
 Create a directory for the project and set your path accordingly. Then download and install Grafana into your $GOPATH directory
@@ -22,6 +22,8 @@ Create a directory for the project and set your path accordingly. Then download 
 export GOPATH=`pwd`
 go get github.com/grafana/grafana
 ```
+
+You may see an error such as: `package github.com/grafana/grafana: no buildable Go source files`. This is just a warning, and you can proceed with the directions.
 
 ## Building the backend
 ```
@@ -40,7 +42,8 @@ To build less to css for the frontend you will need a recent version of node (v0
 npm (v2.5.0) and grunt (v0.4.5). Run the following:
 
 ```
-npm install
+npm install -g yarn
+yarn install --pure-lockfile
 npm install -g grunt-cli
 grunt
 ```
@@ -91,6 +94,3 @@ Learn more about Grafana config options in the [Configuration section](/installa
 
 ## Create a pull requests
 Please contribute to the Grafana project and submit a pull request! Build new features, write or update documentation, fix bugs and generally make Grafana even more awesome.
-
-Before or after you create a pull request, sign the [contributor license agreement](/project/cla.html).
-Together we can build amazing software faster.

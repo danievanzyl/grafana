@@ -10,6 +10,7 @@ export class VariableEditorCtrl {
   constructor(private $scope, private datasourceSrv, private variableSrv, templateSrv) {
     $scope.variableTypes = variableTypes;
     $scope.ctrl = {};
+    $scope.namePattern = /^((?!__).)*$/;
 
     $scope.refreshOptions = [
       {value: 0, text: "Never"},
@@ -35,7 +36,7 @@ export class VariableEditorCtrl {
       $scope.mode = 'list';
 
       $scope.datasources = _.filter(datasourceSrv.getMetricSources(), function(ds) {
-        return !ds.meta.builtIn && ds.value !== null;
+        return !ds.meta.mixed && ds.value !== null;
       });
 
       $scope.datasourceTypes = _($scope.datasources).uniqBy('meta.id').map(function(ds) {
@@ -76,6 +77,11 @@ export class VariableEditorCtrl {
         return false;
       }
 
+      if ($scope.current.type === 'query' && $scope.current.query.match(new RegExp('\\$' + $scope.current.name))) {
+        $scope.appEvent('alert-warning', ['Validation', 'Query cannot contain a reference to itself. Variable: $'  + $scope.current.name]);
+        return false;
+      }
+
       return true;
     };
 
@@ -106,7 +112,7 @@ export class VariableEditorCtrl {
     };
 
     $scope.duplicate = function(variable) {
-      var clone = _.cloneDeep(variable.getModel());
+      var clone = _.cloneDeep(variable.getSaveModel());
       $scope.current = variableSrv.createVariableFromModel(clone);
       $scope.variables.push($scope.current);
       $scope.current.name = 'copy_of_'+variable.name;

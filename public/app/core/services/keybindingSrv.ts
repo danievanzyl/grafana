@@ -83,12 +83,9 @@ export class KeybindingSrv {
   }
 
   setupDashboardBindings(scope, dashboard) {
-    // this.bind('b', () => {
-    //   dashboard.toggleEditMode();
-    // });
-
     this.bind('mod+o', () => {
-      dashboard.sharedCrosshair = !dashboard.sharedCrosshair;
+      dashboard.graphTooltip = (dashboard.graphTooltip + 1) % 3;
+      appEvents.emit('graph-hover-clear');
       scope.broadcastRefresh();
     });
 
@@ -101,7 +98,11 @@ export class KeybindingSrv {
     });
 
     this.bind('t z', () => {
-      scope.appEvent('zoom-out');
+      scope.appEvent('zoom-out', 2);
+    });
+
+    this.bind('ctrl+z', () => {
+      scope.appEvent('zoom-out', 2);
     });
 
     this.bind('t left', () => {
@@ -179,6 +180,20 @@ export class KeybindingSrv {
         var panelInfo = dashboard.getPanelInfoById(dashboard.meta.focusPanelId);
         panelInfo.row.toggleCollapse();
         dashboard.meta.focusPanelId = 0;
+      }
+    });
+
+    // collapse all rows
+    this.bind('d C', () => {
+      for (let row of dashboard.rows) {
+        row.collapse = true;
+      }
+    });
+
+    // expand all rows
+    this.bind('d E', () => {
+      for (let row of dashboard.rows) {
+        row.collapse = false;
       }
     });
 

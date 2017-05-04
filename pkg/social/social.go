@@ -8,14 +8,15 @@ import (
 	"golang.org/x/oauth2"
 
 	"github.com/grafana/grafana/pkg/setting"
+	"github.com/grafana/grafana/pkg/util"
 )
 
 type BasicUserInfo struct {
-	Name     string
-	Email    string
-	Login    string
-	Company  string
-	Role     string
+	Name    string
+	Email   string
+	Login   string
+	Company string
+	Role    string
 }
 
 type SocialConnector interface {
@@ -27,6 +28,14 @@ type SocialConnector interface {
 	AuthCodeURL(state string, opts ...oauth2.AuthCodeOption) string
 	Exchange(ctx context.Context, code string) (*oauth2.Token, error)
 	Client(ctx context.Context, t *oauth2.Token) *http.Client
+}
+
+type Error struct {
+	s string
+}
+
+func (e *Error) Error() string {
+	return e.s
 }
 
 var (
@@ -45,12 +54,12 @@ func NewOAuthService() {
 		info := &setting.OAuthInfo{
 			ClientId:       sec.Key("client_id").String(),
 			ClientSecret:   sec.Key("client_secret").String(),
-			Scopes:         sec.Key("scopes").Strings(" "),
+			Scopes:         util.SplitString(sec.Key("scopes").String()),
 			AuthUrl:        sec.Key("auth_url").String(),
 			TokenUrl:       sec.Key("token_url").String(),
 			ApiUrl:         sec.Key("api_url").String(),
 			Enabled:        sec.Key("enabled").MustBool(),
-			AllowedDomains: sec.Key("allowed_domains").Strings(" "),
+			AllowedDomains: util.SplitString(sec.Key("allowed_domains").String()),
 			HostedDomain:   sec.Key("hosted_domain").String(),
 			AllowSignup:    sec.Key("allow_sign_up").MustBool(),
 			Name:           sec.Key("name").MustString(name),
@@ -84,18 +93,18 @@ func NewOAuthService() {
 				apiUrl:               info.ApiUrl,
 				allowSignup:          info.AllowSignup,
 				teamIds:              sec.Key("team_ids").Ints(","),
-				allowedOrganizations: sec.Key("allowed_organizations").Strings(" "),
+				allowedOrganizations: util.SplitString(sec.Key("allowed_organizations").String()),
 			}
 		}
 
 		// Google.
 		if name == "google" {
 			SocialMap["google"] = &SocialGoogle{
-				Config:               &config,
-				allowedDomains:       info.AllowedDomains,
-				hostedDomain:         info.HostedDomain,
-				apiUrl:               info.ApiUrl,
-				allowSignup:          info.AllowSignup,
+				Config:         &config,
+				allowedDomains: info.AllowedDomains,
+				hostedDomain:   info.HostedDomain,
+				apiUrl:         info.ApiUrl,
+				allowSignup:    info.AllowSignup,
 			}
 		}
 
@@ -107,7 +116,7 @@ func NewOAuthService() {
 				apiUrl:               info.ApiUrl,
 				allowSignup:          info.AllowSignup,
 				teamIds:              sec.Key("team_ids").Ints(","),
-				allowedOrganizations: sec.Key("allowed_organizations").Strings(" "),
+				allowedOrganizations: util.SplitString(sec.Key("allowed_organizations").String()),
 			}
 		}
 
@@ -115,19 +124,19 @@ func NewOAuthService() {
 			config = oauth2.Config{
 				ClientID:     info.ClientId,
 				ClientSecret: info.ClientSecret,
-				Endpoint:     oauth2.Endpoint{
-					AuthURL:      setting.GrafanaNetUrl + "/oauth2/authorize",
-					TokenURL:     setting.GrafanaNetUrl + "/api/oauth2/token",
+				Endpoint: oauth2.Endpoint{
+					AuthURL:  setting.GrafanaNetUrl + "/oauth2/authorize",
+					TokenURL: setting.GrafanaNetUrl + "/api/oauth2/token",
 				},
-				RedirectURL:  strings.TrimSuffix(setting.AppUrl, "/") + SocialBaseUrl + name,
-				Scopes:       info.Scopes,
+				RedirectURL: strings.TrimSuffix(setting.AppUrl, "/") + SocialBaseUrl + name,
+				Scopes:      info.Scopes,
 			}
 
 			SocialMap["grafananet"] = &SocialGrafanaNet{
 				Config:               &config,
 				url:                  setting.GrafanaNetUrl,
 				allowSignup:          info.AllowSignup,
-				allowedOrganizations: sec.Key("allowed_organizations").Strings(" "),
+				allowedOrganizations: util.SplitString(sec.Key("allowed_organizations").String()),
 			}
 		}
 	}

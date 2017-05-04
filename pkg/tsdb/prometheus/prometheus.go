@@ -7,34 +7,68 @@ import (
 	"strings"
 	"time"
 
-	"gopkg.in/guregu/null.v3"
+	"net/http"
 
+	"github.com/grafana/grafana/pkg/components/null"
 	"github.com/grafana/grafana/pkg/log"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/tsdb"
 	"github.com/prometheus/client_golang/api/prometheus"
 	pmodel "github.com/prometheus/common/model"
 )
 
 type PrometheusExecutor struct {
-	*tsdb.DataSourceInfo
+	*models.DataSource
+	Transport *http.Transport
 }
 
-func NewPrometheusExecutor(dsInfo *tsdb.DataSourceInfo) tsdb.Executor {
-	return &PrometheusExecutor{dsInfo}
+type basicAuthTransport struct {
+	*http.Transport
+
+	username string
+	password string
+}
+
+func (bat basicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.SetBasicAuth(bat.username, bat.password)
+	return bat.Transport.RoundTrip(req)
+}
+
+func NewPrometheusExecutor(dsInfo *models.DataSource) (tsdb.Executor, error) {
+	transport, err := dsInfo.GetHttpTransport()
+	if err != nil {
+		return nil, err
+	}
+
+	return &PrometheusExecutor{
+		DataSource: dsInfo,
+		Transport:  transport,
+	}, nil
 }
 
 var (
-	plog log.Logger
+	plog         log.Logger
+	legendFormat *regexp.Regexp
 )
 
 func init() {
 	plog = log.New("tsdb.prometheus")
 	tsdb.RegisterExecutor("prometheus", NewPrometheusExecutor)
+	legendFormat = regexp.MustCompile(`\{\{\s*(.+?)\s*\}\}`)
 }
 
 func (e *PrometheusExecutor) getClient() (prometheus.QueryAPI, error) {
 	cfg := prometheus.Config{
-		Address: e.DataSourceInfo.Url,
+		Address:   e.DataSource.Url,
+		Transport: e.Transport,
+	}
+
+	if e.BasicAuth {
+		cfg.Transport = basicAuthTransport{
+			Transport: e.Transport,
+			username:  e.BasicAuthUser,
+			password:  e.BasicAuthPassword,
+		}
 	}
 
 	client, err := prometheus.New(cfg)
@@ -79,13 +113,11 @@ func (e *PrometheusExecutor) Execute(ctx context.Context, queries tsdb.QuerySlic
 }
 
 func formatLegend(metric pmodel.Metric, query *PrometheusQuery) string {
-	reg, _ := regexp.Compile(`\{\{\s*(.+?)\s*\}\}`)
-
 	if query.LegendFormat == "" {
 		return metric.String()
 	}
 
-	result := reg.ReplaceAllFunc([]byte(query.LegendFormat), func(in []byte) []byte {
+	result := legendFormat.ReplaceAllFunc([]byte(query.LegendFormat), func(in []byte) []byte {
 		labelName := strings.Replace(string(in), "{{", "", 1)
 		labelName = strings.Replace(labelName, "}}", "", 1)
 		labelName = strings.TrimSpace(labelName)
@@ -145,6 +177,11 @@ func parseResponse(value pmodel.Value, query *PrometheusQuery) (map[string]*tsdb
 	for _, v := range data {
 		series := tsdb.TimeSeries{
 			Name: formatLegend(v.Metric, query),
+			Tags: map[string]string{},
+		}
+
+		for k, v := range v.Metric {
+			series.Tags[string(k)] = string(v)
 		}
 
 		for _, k := range v.Values {

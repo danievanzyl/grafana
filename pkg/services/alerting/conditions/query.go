@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana/pkg/bus"
+	"github.com/grafana/grafana/pkg/components/null"
 	"github.com/grafana/grafana/pkg/components/simplejson"
 	m "github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/services/alerting"
@@ -23,6 +24,7 @@ type QueryCondition struct {
 	Query         AlertQuery
 	Reducer       QueryReducer
 	Evaluator     AlertEvaluator
+	Operator      string
 	HandleRequest tsdb.HandleRequestFunc
 }
 
@@ -44,18 +46,18 @@ func (c *QueryCondition) Eval(context *alerting.EvalContext) (*alerting.Conditio
 	emptySerieCount := 0
 	evalMatchCount := 0
 	var matches []*alerting.EvalMatch
+
 	for _, series := range seriesList {
 		reducedValue := c.Reducer.Reduce(series)
 		evalMatch := c.Evaluator.Eval(reducedValue)
 
 		if reducedValue.Valid == false {
 			emptySerieCount++
-			continue
 		}
 
 		if context.IsTestRun {
 			context.Logs = append(context.Logs, &alerting.ResultLogEntry{
-				Message: fmt.Sprintf("Condition[%d]: Eval: %v, Metric: %s, Value: %1.3f", c.Index, evalMatch, series.Name, reducedValue.Float64),
+				Message: fmt.Sprintf("Condition[%d]: Eval: %v, Metric: %s, Value: %s", c.Index, evalMatch, series.Name, reducedValue),
 			})
 		}
 
@@ -64,14 +66,33 @@ func (c *QueryCondition) Eval(context *alerting.EvalContext) (*alerting.Conditio
 
 			matches = append(matches, &alerting.EvalMatch{
 				Metric: series.Name,
-				Value:  reducedValue.Float64,
+				Value:  reducedValue,
+				Tags:   series.Tags,
 			})
+		}
+	}
+
+	// handle no series special case
+	if len(seriesList) == 0 {
+		// eval condition for null value
+		evalMatch := c.Evaluator.Eval(null.FloatFromPtr(nil))
+
+		if context.IsTestRun {
+			context.Logs = append(context.Logs, &alerting.ResultLogEntry{
+				Message: fmt.Sprintf("Condition: Eval: %v, Query Returned No Series (reduced to null/no value)", evalMatch),
+			})
+		}
+
+		if evalMatch {
+			evalMatchCount++
+			matches = append(matches, &alerting.EvalMatch{Metric: "NoData", Value: null.FloatFromPtr(nil)})
 		}
 	}
 
 	return &alerting.ConditionResult{
 		Firing:      evalMatchCount > 0,
 		NoDataFound: emptySerieCount == len(seriesList),
+		Operator:    c.Operator,
 		EvalMatches: matches,
 	}, nil
 }
@@ -117,21 +138,9 @@ func (c *QueryCondition) getRequestForAlertRule(datasource *m.DataSource, timeRa
 		TimeRange: timeRange,
 		Queries: []*tsdb.Query{
 			{
-				RefId: "A",
-				Model: c.Query.Model,
-				DataSource: &tsdb.DataSourceInfo{
-					Id:                datasource.Id,
-					Name:              datasource.Name,
-					PluginId:          datasource.Type,
-					Url:               datasource.Url,
-					User:              datasource.User,
-					Password:          datasource.Password,
-					Database:          datasource.Database,
-					BasicAuth:         datasource.BasicAuth,
-					BasicAuthUser:     datasource.BasicAuthUser,
-					BasicAuthPassword: datasource.BasicAuthPassword,
-					JsonData:          datasource.JsonData,
-				},
+				RefId:      "A",
+				Model:      c.Query.Model,
+				DataSource: datasource,
 			},
 		},
 	}
@@ -168,8 +177,12 @@ func NewQueryCondition(model *simplejson.Json, index int) (*QueryCondition, erro
 	if err != nil {
 		return nil, err
 	}
-
 	condition.Evaluator = evaluator
+
+	operatorJson := model.Get("operator")
+	operator := operatorJson.Get("type").MustString("and")
+	condition.Operator = operator
+
 	return &condition, nil
 }
 

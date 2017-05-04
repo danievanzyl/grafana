@@ -21,9 +21,22 @@ type Notifier interface {
 	GetIsDefault() bool
 }
 
+type NotifierSlice []Notifier
+
+func (notifiers NotifierSlice) ShouldUploadImage() bool {
+	for _, notifier := range notifiers {
+		if notifier.NeedsImage() {
+			return true
+		}
+	}
+
+	return false
+}
+
 type ConditionResult struct {
 	Firing      bool
 	NoDataFound bool
+	Operator    string
 	EvalMatches []*EvalMatch
 }
 

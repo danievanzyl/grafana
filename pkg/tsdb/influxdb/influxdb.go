@@ -11,36 +11,40 @@ import (
 	"golang.org/x/net/context/ctxhttp"
 
 	"github.com/grafana/grafana/pkg/log"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
 	"github.com/grafana/grafana/pkg/tsdb"
 )
 
 type InfluxDBExecutor struct {
-	*tsdb.DataSourceInfo
+	*models.DataSource
 	QueryParser    *InfluxdbQueryParser
-	QueryBuilder   *QueryBuilder
 	ResponseParser *ResponseParser
+	HttpClient     *http.Client
 }
 
-func NewInfluxDBExecutor(dsInfo *tsdb.DataSourceInfo) tsdb.Executor {
-	return &InfluxDBExecutor{
-		DataSourceInfo: dsInfo,
-		QueryParser:    &InfluxdbQueryParser{},
-		QueryBuilder:   &QueryBuilder{},
-		ResponseParser: &ResponseParser{},
+func NewInfluxDBExecutor(datasource *models.DataSource) (tsdb.Executor, error) {
+	httpClient, err := datasource.GetHttpClient()
+
+	if err != nil {
+		return nil, err
 	}
+
+	return &InfluxDBExecutor{
+		DataSource:     datasource,
+		QueryParser:    &InfluxdbQueryParser{},
+		ResponseParser: &ResponseParser{},
+		HttpClient:     httpClient,
+	}, nil
 }
 
 var (
-	glog       log.Logger
-	HttpClient *http.Client
+	glog log.Logger
 )
 
 func init() {
 	glog = log.New("tsdb.influxdb")
 	tsdb.RegisterExecutor("influxdb", NewInfluxDBExecutor)
-
-	HttpClient = tsdb.GetDefaultClient()
 }
 
 func (e *InfluxDBExecutor) Execute(ctx context.Context, queries tsdb.QuerySlice, context *tsdb.QueryContext) *tsdb.BatchResult {
@@ -51,16 +55,21 @@ func (e *InfluxDBExecutor) Execute(ctx context.Context, queries tsdb.QuerySlice,
 		return result.WithError(err)
 	}
 
-	if setting.Env == setting.DEV {
-		glog.Debug("Influxdb query", "raw query", query)
-	}
-
-	req, err := e.createRequest(query)
+	rawQuery, err := query.Build(context)
 	if err != nil {
 		return result.WithError(err)
 	}
 
-	resp, err := ctxhttp.Do(ctx, HttpClient, req)
+	if setting.Env == setting.DEV {
+		glog.Debug("Influxdb query", "raw query", rawQuery)
+	}
+
+	req, err := e.createRequest(rawQuery)
+	if err != nil {
+		return result.WithError(err)
+	}
+
+	resp, err := ctxhttp.Do(ctx, e.HttpClient, req)
 	if err != nil {
 		return result.WithError(err)
 	}
@@ -79,29 +88,28 @@ func (e *InfluxDBExecutor) Execute(ctx context.Context, queries tsdb.QuerySlice,
 		return result.WithError(err)
 	}
 
+	if response.Err != nil {
+		return result.WithError(response.Err)
+	}
+
 	result.QueryResults = make(map[string]*tsdb.QueryResult)
-	result.QueryResults["A"] = e.ResponseParser.Parse(&response)
+	result.QueryResults["A"] = e.ResponseParser.Parse(&response, query)
 
 	return result
 }
 
-func (e *InfluxDBExecutor) getQuery(queries tsdb.QuerySlice, context *tsdb.QueryContext) (string, error) {
+func (e *InfluxDBExecutor) getQuery(queries tsdb.QuerySlice, context *tsdb.QueryContext) (*Query, error) {
 	for _, v := range queries {
 
-		query, err := e.QueryParser.Parse(v.Model, e.DataSourceInfo)
+		query, err := e.QueryParser.Parse(v.Model, e.DataSource)
 		if err != nil {
-			return "", err
+			return nil, err
 		}
 
-		rawQuery, err := e.QueryBuilder.Build(query, context)
-		if err != nil {
-			return "", err
-		}
-
-		return rawQuery, nil
+		return query, nil
 	}
 
-	return "", fmt.Errorf("query request contains no queries")
+	return nil, fmt.Errorf("query request contains no queries")
 }
 
 func (e *InfluxDBExecutor) createRequest(query string) (*http.Request, error) {
@@ -125,7 +133,7 @@ func (e *InfluxDBExecutor) createRequest(query string) (*http.Request, error) {
 		req.SetBasicAuth(e.BasicAuthUser, e.BasicAuthPassword)
 	}
 
-	if e.User != "" {
+	if !e.BasicAuth && e.User != "" {
 		req.SetBasicAuth(e.User, e.Password)
 	}
 

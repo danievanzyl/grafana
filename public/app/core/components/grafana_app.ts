@@ -73,6 +73,9 @@ export function grafanaAppDirective(playlistSrv, contextSrv) {
       var ignoreSideMenuHide;
       var body = $('body');
 
+      // see https://github.com/zenorocha/clipboard.js/issues/155
+      $.fn.modal.Constructor.prototype.enforceFocus = function() {};
+
       // handle sidemenu open state
       scope.$watch('contextSrv.sidemenu', newVal => {
         if (newVal !== undefined) {
@@ -147,9 +150,14 @@ export function grafanaAppDirective(playlistSrv, contextSrv) {
         }
       }
 
+      // mouse and keyboard is user activity
       body.mousemove(userActivityDetected);
       body.keydown(userActivityDetected);
-      setInterval(checkForInActiveUser, 1000);
+      // treat tab change as activity
+      document.addEventListener('visibilitychange', userActivityDetected);
+
+      // check every 2 seconds
+      setInterval(checkForInActiveUser, 2000);
 
       appEvents.on('toggle-view-mode', () => {
         lastActivity = 0;

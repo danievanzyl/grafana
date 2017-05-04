@@ -26,8 +26,7 @@ class GraphCtrl extends MetricsPanelCtrl {
   alertState: any;
 
   annotationsPromise: any;
-  datapointsCount: number;
-  datapointsOutside: boolean;
+  dataWarning: any;
   colors: any = [];
   subTabIndex: number;
   processor: DataProcessor;
@@ -60,6 +59,7 @@ class GraphCtrl extends MetricsPanelCtrl {
       mode: 'time',
       name: null,
       values: [],
+      buckets: null
     },
     // show/hide lines
     lines         : true,
@@ -67,6 +67,12 @@ class GraphCtrl extends MetricsPanelCtrl {
     fill          : 1,
     // line width in pixels
     linewidth     : 1,
+    // show/hide dashed line
+    dashes        : false,
+    // length of a dash
+    dashLength    : 10,
+    // length of space between two dashes
+    spaceLength   : 10,
     // show hide points
     points        : false,
     // point radius in pixels
@@ -88,7 +94,7 @@ class GraphCtrl extends MetricsPanelCtrl {
       avg: false
     },
     // how null points should be handled
-    nullPointMode : 'connected',
+    nullPointMode : 'null',
     // staircase line mode
     steppedLine: false,
     // tooltip options
@@ -96,7 +102,6 @@ class GraphCtrl extends MetricsPanelCtrl {
       value_type: 'individual',
       shared: true,
       sort: 0,
-      msResolution: false,
     },
     // time overrides
     timeFrom: null,
@@ -133,7 +138,10 @@ class GraphCtrl extends MetricsPanelCtrl {
     this.addEditorTab('Axes', axesEditorComponent, 2);
     this.addEditorTab('Legend', 'public/app/plugins/panel/graph/tab_legend.html', 3);
     this.addEditorTab('Display', 'public/app/plugins/panel/graph/tab_display.html', 4);
-    this.addEditorTab('Alert', alertTab, 5);
+
+    if (config.alertingEnabled) {
+      this.addEditorTab('Alert', alertTab, 5);
+    }
 
     this.subTabIndex = 0;
   }
@@ -176,14 +184,26 @@ class GraphCtrl extends MetricsPanelCtrl {
     this.dataList = dataList;
     this.seriesList = this.processor.getSeriesList({dataList: dataList, range: this.range});
 
-    this.datapointsCount = this.seriesList.reduce((prev, series) => {
+    this.dataWarning = null;
+    const datapointsCount = this.seriesList.reduce((prev, series) => {
       return prev + series.datapoints.length;
     }, 0);
 
-    this.datapointsOutside = false;
-    for (let series of this.seriesList) {
-      if (series.isOutsideRange) {
-        this.datapointsOutside = true;
+    if (datapointsCount === 0) {
+      this.dataWarning = {
+        title: 'No data points',
+        tip: 'No datapoints returned from data query'
+      };
+    } else {
+
+      for (let series of this.seriesList) {
+        if (series.isOutsideRange) {
+          this.dataWarning = {
+            title: 'Data points outside time range',
+            tip: 'Can be caused by timezone mismatch or missing time filter in query',
+          };
+          break;
+        }
       }
     }
 
@@ -270,7 +290,7 @@ class GraphCtrl extends MetricsPanelCtrl {
     }
     info.yaxis = override.yaxis = info.yaxis === 2 ? 1 : 2;
     this.render();
-  };
+  }
 
   addSeriesOverride(override) {
     this.panel.seriesOverrides.push(override || {});
@@ -302,4 +322,4 @@ class GraphCtrl extends MetricsPanelCtrl {
 
 }
 
-export {GraphCtrl, GraphCtrl as PanelCtrl}
+export {GraphCtrl, GraphCtrl as PanelCtrl};

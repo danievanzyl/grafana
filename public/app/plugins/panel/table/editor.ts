@@ -39,6 +39,7 @@ export class TablePanelEditorCtrl {
       {text: 'Number', value: 'number'},
       {text: 'String', value: 'string'},
       {text: 'Date', value: 'date'},
+      {text: 'Hidden', value: 'hidden'}
     ];
     this.fontSizes = ['80%', '90%', '100%', '110%', '120%', '130%', '150%', '160%', '180%', '200%', '220%', '250%'];
     this.dateFormats = [
@@ -100,7 +101,7 @@ export class TablePanelEditorCtrl {
   setUnitFormat(column, subItem) {
     column.unit = subItem.value;
     this.panelCtrl.render();
-  };
+  }
 
   addColumnStyle() {
     var columnStyleDefaults = {

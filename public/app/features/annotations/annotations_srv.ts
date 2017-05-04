@@ -36,6 +36,18 @@ export class AnnotationsSrv {
       // combine the annotations and flatten results
       var annotations = _.flattenDeep([results[0], results[1]]);
 
+      // filter out annotations that do not belong to requesting panel
+      annotations = _.filter(annotations, item => {
+        // shownIn === 1 requires annotation matching panel id
+        if (item.source.showIn === 1) {
+          if (item.panelId && options.panel.id === item.panelId) {
+            return true;
+          }
+          return false;
+        }
+        return true;
+      });
+
       // look for alert state for this panel
       var alertState = _.find(results[2], {panelId: options.panel.id});
 
@@ -126,7 +138,19 @@ export class AnnotationsSrv {
     return this.globalAnnotationsPromise;
   }
 
+  saveAnnotationEvent(annotation) {
+    this.globalAnnotationsPromise = null;
+    return this.backendSrv.post('/api/annotations', annotation);
+  }
+
   translateQueryResult(annotation, results) {
+    // if annotation has snapshotData
+    // make clone and remove it
+    if (annotation.snapshotData) {
+      annotation = angular.copy(annotation);
+      delete annotation.snapshotData;
+    }
+
     for (var item of results) {
       item.source = annotation;
       item.min = item.time;

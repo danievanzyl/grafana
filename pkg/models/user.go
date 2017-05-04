@@ -10,6 +10,12 @@ var (
 	ErrUserNotFound = errors.New("User not found")
 )
 
+type Password string
+
+func (p Password) IsWeak() bool {
+	return len(p) <= 4
+}
+
 type User struct {
 	Id            int64
 	Version       int
@@ -22,6 +28,7 @@ type User struct {
 	Company       string
 	EmailVerified bool
 	Theme         string
+	HelpFlags1    HelpFlags1
 
 	IsAdmin bool
 	OrgId   int64
@@ -110,6 +117,7 @@ type GetSignedInUserQuery struct {
 	UserId int64
 	Login  string
 	Email  string
+	OrgId  int64
 	Result *SignedInUser
 }
 
@@ -123,7 +131,14 @@ type SearchUsersQuery struct {
 	Page  int
 	Limit int
 
-	Result []*UserSearchHitDTO
+	Result SearchUserQueryResult
+}
+
+type SearchUserQueryResult struct {
+	TotalCount int64               `json:"totalCount"`
+	Users      []*UserSearchHitDTO `json:"users"`
+	Page       int                 `json:"page"`
+	PerPage    int                 `json:"perPage"`
 }
 
 type GetUserOrgListQuery struct {
@@ -144,6 +159,7 @@ type SignedInUser struct {
 	Email          string
 	ApiKeyId       int64
 	IsGrafanaAdmin bool
+	HelpFlags1     HelpFlags1
 }
 
 type UserProfileDTO struct {

@@ -1,8 +1,13 @@
-----
-page_title: Dashboard API
-page_description: Grafana Dashboard API Reference
-page_keywords: grafana, admin, http, api, documentation, dashboard
----
++++
+title = "Dashboard HTTP API "
+description = "Grafana Dashboard HTTP API"
+keywords = ["grafana", "http", "documentation", "api", "dashboard"]
+aliases = ["/http_api/dashboard/"]
+type = "docs"
+[menu.docs]
+name = "Dashboard"
+parent = "http_api"
++++
 
 # Dashboard API
 
@@ -195,7 +200,7 @@ Get all tags of dashboards
 
 **Example Request**:
 
-    GET /api/dashboards/home HTTP/1.1
+    GET /api/dashboards/tags HTTP/1.1
     Accept: application/json
     Content-Type: application/json
     Authorization: Bearer eyJrIjoiT0tTcG1pUlY2RnVKZTFVaDFsNFZXdE9ZWmNrMkZYbk
@@ -216,10 +221,6 @@ Get all tags of dashboards
       }
     ]
 
-## Dashboard from JSON file
-
-`GET /file/:file`
-
 ## Search Dashboards
 
 `GET /api/search/`
@@ -227,7 +228,7 @@ Get all tags of dashboards
 Status Codes:
 
 - **query** – Search Query
-- **tags** – Tags to use
+- **tag** – Tag to use
 - **starred** – Flag indicating if only starred Dashboards should be returned
 - **tagcloud** - Flag indicating if a tagcloud should be returned
 

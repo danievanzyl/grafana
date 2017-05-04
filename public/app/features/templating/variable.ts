@@ -10,7 +10,7 @@ export interface Variable {
   dependsOn(variable);
   setValueFromUrl(urlValue);
   getValueForUrl();
-  getModel();
+  getSaveModel();
 }
 
 export var variableTypes = {};
@@ -23,7 +23,7 @@ export function containsVariable(...args: any[]) {
   var str = args[0] || '';
 
   for (var i = 1; i < args.length-1; i++) {
-    str += args[i] || '';
+    str += ' ' + args[i] || '';
   }
 
   variableName = kbn.regexEscape(variableName);
