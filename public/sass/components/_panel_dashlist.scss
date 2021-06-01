@@ -5,24 +5,33 @@
 
 .dashlist-section {
   margin-bottom: $spacer;
+  padding-top: 3px;
 }
 
 .dashlist-link {
-  display: block;
-  margin: 5px;
-  padding: 7px;
-  background-color: $tight-form-bg;
+  @include list-item();
+  display: flex;
+
   .fa {
-    float: right;
     padding-top: 3px;
   }
+
   .fa-star {
     color: $orange;
   }
-
-  &:hover {
-    background-color: $tight-form-func-bg;
-  }
 }
 
+.dashlist-star {
+  display: flex;
+  align-items: center;
+  color: $text-color-weak;
+}
 
+.dashlist-folder {
+  color: $text-color-weak;
+  font-size: $font-size-xs;
+}
+
+.dashlist-link-body {
+  flex-grow: 1;
+}

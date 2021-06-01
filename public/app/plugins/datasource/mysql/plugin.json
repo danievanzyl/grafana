@@ -2,10 +2,12 @@
   "type": "datasource",
   "name": "MySQL",
   "id": "mysql",
+  "category": "sql",
 
   "info": {
+    "description": "Data source for MySQL databases",
     "author": {
-      "name": "Grafana Project",
+      "name": "Grafana Labs",
       "url": "https://grafana.com"
     },
     "logos": {
@@ -14,8 +16,11 @@
     }
   },
 
-  "state": "alpha",
   "alerting": true,
   "annotations": true,
-  "metrics": true
+  "metrics": true,
+
+  "queryOptions": {
+    "minInterval": true
+  }
 }

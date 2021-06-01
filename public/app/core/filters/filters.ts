@@ -1,65 +1,47 @@
-///<reference path="../../headers/common.d.ts" />
-
-import _ from 'lodash';
+import { isArray, isNull, isObject, isUndefined } from 'lodash';
 import angular from 'angular';
-import moment from 'moment';
 import coreModule from '../core_module';
+import { getTemplateSrv, TemplateSrv } from 'app/features/templating/template_srv';
+import { dateTime } from '@grafana/data';
 
-coreModule.filter('stringSort', function() {
-  return function(input) {
+coreModule.filter('stringSort', () => {
+  return (input: any) => {
     return input.sort();
   };
 });
 
-coreModule.filter('slice', function() {
-  return function(arr, start, end) {
-    if (!_.isUndefined(arr)) {
+coreModule.filter('slice', () => {
+  return (arr: any[], start: any, end: any) => {
+    if (!isUndefined(arr)) {
       return arr.slice(start, end);
     }
+    return arr;
   };
 });
 
-coreModule.filter('stringify', function() {
-  return function(arr) {
-    if (_.isObject(arr) && !_.isArray(arr)) {
+coreModule.filter('stringify', () => {
+  return (arr: any[]) => {
+    if (isObject(arr) && !isArray(arr)) {
       return angular.toJson(arr);
     } else {
-      return _.isNull(arr) ? null : arr.toString();
+      return isNull(arr) ? null : arr.toString();
     }
   };
 });
 
-coreModule.filter('moment', function() {
-  return function(date, mode) {
+coreModule.filter('moment', () => {
+  return (date: string, mode: string) => {
     switch (mode) {
       case 'ago':
-        return moment(date).fromNow();
+        return dateTime(date).fromNow();
     }
-    return moment(date).fromNow();
+    return dateTime(date).fromNow();
   };
 });
 
-coreModule.filter('noXml', function() {
-  var noXml = function(text) {
-  return _.isString(text)
-    ? text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/'/g, '&#39;')
-    .replace(/"/g, '&quot;')
-    : text;
-  };
-  return function(text) {
-    return _.isArray(text)
-      ? _.map(text, noXml)
-      : noXml(text);
-  };
-});
-
-coreModule.filter('interpolateTemplateVars', function (templateSrv) {
-  var filterFunc: any = function(text, scope) {
-    var scopedVars;
+function interpolateTemplateVars(templateSrv: TemplateSrv = getTemplateSrv()) {
+  const filterFunc: any = (text: string, scope: any) => {
+    let scopedVars;
     if (scope.ctrl) {
       scopedVars = (scope.ctrl.panel || scope.ctrl.row).scopedVars;
     } else {
@@ -71,6 +53,7 @@ coreModule.filter('interpolateTemplateVars', function (templateSrv) {
 
   filterFunc.$stateful = true;
   return filterFunc;
-});
+}
 
+coreModule.filter('interpolateTemplateVars', interpolateTemplateVars);
 export default {};

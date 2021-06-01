@@ -1,31 +1,75 @@
-///<reference path="../../headers/common.d.ts" />
-
-import config from 'app/core/config';
-import _ from 'lodash';
-import $ from 'jquery';
+import React from 'react';
+import ReactDOM from 'react-dom';
 
 import coreModule from 'app/core/core_module';
 import appEvents from 'app/core/app_events';
 
+import { GrafanaRootScope } from 'app/routes/GrafanaCtrl';
+import { AngularModalProxy } from '../components/modals/AngularModalProxy';
+import { provideTheme } from '../utils/ConfigProvider';
+import {
+  HideModalEvent,
+  ShowConfirmModalEvent,
+  ShowConfirmModalPayload,
+  ShowModalEvent,
+  ShowModalReactEvent,
+} from '../../types/events';
+import { ConfirmModal, ConfirmModalProps } from '@grafana/ui';
+import { deprecationWarning, textUtil } from '@grafana/data';
+
 export class UtilSrv {
   modalScope: any;
+  reactModalRoot = document.body;
+  reactModalNode = document.createElement('div');
 
   /** @ngInject */
-  constructor(private $rootScope, private $modal) {
+  constructor(private $rootScope: GrafanaRootScope, private $modal: any) {
+    this.reactModalNode.setAttribute('id', 'angular2ReactModalRoot');
   }
 
   init() {
-    appEvents.on('show-modal', this.showModal.bind(this), this.$rootScope);
-    appEvents.on('hide-modal', this.hideModal.bind(this), this.$rootScope);
+    appEvents.subscribe(ShowModalEvent, (e) => this.showModal(e.payload));
+    appEvents.subscribe(HideModalEvent, this.hideModal.bind(this));
+    appEvents.subscribe(ShowConfirmModalEvent, (e) => this.showConfirmModal(e.payload));
+    appEvents.subscribe(ShowModalReactEvent, (e) => this.showModalReact(e.payload));
   }
 
+  showModalReact(options: any) {
+    const { component, props } = options;
+    const modalProps = {
+      component,
+      props: {
+        ...props,
+        isOpen: true,
+        onDismiss: this.onReactModalDismiss,
+      },
+    };
+
+    const elem = React.createElement(provideTheme(AngularModalProxy), modalProps);
+    this.reactModalRoot.appendChild(this.reactModalNode);
+    ReactDOM.render(elem, this.reactModalNode);
+  }
+
+  onReactModalDismiss = () => {
+    ReactDOM.unmountComponentAtNode(this.reactModalNode);
+    this.reactModalRoot.removeChild(this.reactModalNode);
+  };
+
+  /**
+   * @deprecated use showModalReact instead that has this capability built in
+   */
   hideModal() {
+    deprecationWarning('UtilSrv', 'hideModal', 'showModalReact');
     if (this.modalScope && this.modalScope.dismiss) {
       this.modalScope.dismiss();
     }
   }
 
-  showModal(options) {
+  /**
+   * @deprecated use showModalReact instead
+   */
+  showModal(options: any) {
+    deprecationWarning('UtilSrv', 'showModal', 'showModalReact');
     if (this.modalScope && this.modalScope.dismiss) {
       this.modalScope.dismiss();
     }
@@ -39,7 +83,7 @@ export class UtilSrv {
       this.modalScope = this.$rootScope.$new();
     }
 
-    var modal = this.$modal({
+    const modal = this.$modal({
       modalClass: options.modalClass,
       template: options.src,
       templateHtml: options.templateHtml,
@@ -47,12 +91,58 @@ export class UtilSrv {
       show: false,
       scope: this.modalScope,
       keyboard: false,
-      backdrop: options.backdrop
+      backdrop: options.backdrop,
     });
 
-    Promise.resolve(modal).then(function(modalEl) {
+    Promise.resolve(modal).then((modalEl) => {
       modalEl.modal('show');
     });
+  }
+
+  showConfirmModal(payload: ShowConfirmModalPayload) {
+    const {
+      confirmText,
+      onConfirm = () => undefined,
+      text2,
+      altActionText,
+      onAltAction,
+      noText,
+      text,
+      text2htmlBind,
+      yesText = 'Yes',
+      icon,
+      title = 'Confirm',
+    } = payload;
+    const props: ConfirmModalProps = {
+      confirmText: yesText,
+      confirmationText: confirmText,
+      icon,
+      title,
+      body: text,
+      description: text2 && text2htmlBind ? textUtil.sanitize(text2) : text2,
+      isOpen: true,
+      dismissText: noText,
+      onConfirm: () => {
+        onConfirm();
+        this.onReactModalDismiss();
+      },
+      onDismiss: this.onReactModalDismiss,
+      onAlternative: onAltAction
+        ? () => {
+            onAltAction();
+            this.onReactModalDismiss();
+          }
+        : undefined,
+      alternativeText: altActionText,
+    };
+    const modalProps = {
+      component: ConfirmModal,
+      props,
+    };
+
+    const elem = React.createElement(provideTheme(AngularModalProxy), modalProps);
+    this.reactModalRoot.appendChild(this.reactModalNode);
+    ReactDOM.render(elem, this.reactModalNode);
   }
 }
 

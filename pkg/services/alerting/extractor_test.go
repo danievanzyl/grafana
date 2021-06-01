@@ -1,515 +1,247 @@
 package alerting
 
 import (
+	"io/ioutil"
 	"testing"
+	"time"
 
 	"github.com/grafana/grafana/pkg/bus"
 	"github.com/grafana/grafana/pkg/components/simplejson"
-	m "github.com/grafana/grafana/pkg/models"
-	"github.com/grafana/grafana/pkg/setting"
-	. "github.com/smartystreets/goconvey/convey"
+	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/services/sqlstore"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAlertRuleExtraction(t *testing.T) {
+	RegisterCondition("query", func(model *simplejson.Json, index int) (Condition, error) {
+		return &FakeCondition{}, nil
+	})
 
-	Convey("Parsing alert rules  from dashboard json", t, func() {
+	// mock data
+	defaultDs := &models.DataSource{Id: 12, OrgId: 1, Name: "I am default", IsDefault: true}
+	graphite2Ds := &models.DataSource{Id: 15, OrgId: 1, Name: "graphite2"}
+	influxDBDs := &models.DataSource{Id: 16, OrgId: 1, Name: "InfluxDB"}
+	prom := &models.DataSource{Id: 17, OrgId: 1, Name: "Prometheus"}
 
-		RegisterCondition("query", func(model *simplejson.Json, index int) (Condition, error) {
-			return &FakeCondition{}, nil
-		})
+	bus.AddHandler("test", func(query *models.GetDefaultDataSourceQuery) error {
+		query.Result = defaultDs
+		return nil
+	})
 
-		setting.NewConfigContext(&setting.CommandLineArgs{
-			HomePath: "../../../",
-		})
+	bus.AddHandler("test", func(query *models.GetDataSourceQuery) error {
+		if query.Name == defaultDs.Name {
+			query.Result = defaultDs
+		}
+		if query.Name == graphite2Ds.Name {
+			query.Result = graphite2Ds
+		}
+		if query.Name == influxDBDs.Name {
+			query.Result = influxDBDs
+		}
+		if query.Name == prom.Name {
+			query.Result = prom
+		}
 
-		// mock data
-		defaultDs := &m.DataSource{Id: 12, OrgId: 1, Name: "I am default", IsDefault: true}
-		graphite2Ds := &m.DataSource{Id: 15, OrgId: 1, Name: "graphite2"}
-		influxDBDs := &m.DataSource{Id: 16, OrgId: 1, Name: "InfluxDB"}
+		return nil
+	})
 
-		bus.AddHandler("test", func(query *m.GetDataSourcesQuery) error {
-			query.Result = []*m.DataSource{defaultDs, graphite2Ds}
-			return nil
-		})
+	json, err := ioutil.ReadFile("./testdata/graphite-alert.json")
+	require.Nil(t, err)
 
-		bus.AddHandler("test", func(query *m.GetDataSourceByNameQuery) error {
-			if query.Name == defaultDs.Name {
-				query.Result = defaultDs
-			}
-			if query.Name == graphite2Ds.Name {
-				query.Result = graphite2Ds
-			}
-			if query.Name == influxDBDs.Name {
-				query.Result = influxDBDs
-			}
-			return nil
-		})
+	t.Run("Parsing alert rules from dashboard json", func(t *testing.T) {
+		dashJSON, err := simplejson.NewJson(json)
+		require.Nil(t, err)
 
-		json := `
-      {
-        "id": 57,
-        "title": "Graphite 4",
-        "originalTitle": "Graphite 4",
-        "tags": ["graphite"],
-        "rows": [
-        {
-          "panels": [
-          {
-            "title": "Active desktop users",
-            "editable": true,
-            "type": "graph",
-            "id": 3,
-            "targets": [
-            {
-              "refId": "A",
-              "target": "aliasByNode(statsd.fakesite.counters.session_start.desktop.count, 4)"
-            }
-            ],
-            "datasource": null,
-            "alert": {
-              "name": "name1",
-              "message": "desc1",
-              "handler": 1,
-              "frequency": "60s",
-              "conditions": [
-              {
-                "type": "query",
-                "query": {"params": ["A", "5m", "now"]},
-                "reducer": {"type": "avg", "params": []},
-                "evaluator": {"type": ">", "params": [100]}
-              }
-              ]
-            }
-          },
-          {
-            "title": "Active mobile users",
-            "id": 4,
-            "targets": [
-              {"refId": "A", "target": ""},
-              {"refId": "B", "target": "aliasByNode(statsd.fakesite.counters.session_start.mobile.count, 4)"}
-            ],
-            "datasource": "graphite2",
-            "alert": {
-              "name": "name2",
-              "message": "desc2",
-              "handler": 0,
-              "frequency": "60s",
-              "severity": "warning",
-              "conditions": [
-              {
-                "type": "query",
-                "query":  {"params": ["B", "5m", "now"]},
-                "reducer": {"type": "avg", "params": []},
-                "evaluator": {"type": ">", "params": [100]}
-              }
-              ]
-            }
-          }
-          ]
-        }
-      ]
-      }`
+		dash := models.NewDashboardFromJson(dashJSON)
 
-		Convey("Extractor should not modify the original json", func() {
-			dashJson, err := simplejson.NewJson([]byte(json))
-			So(err, ShouldBeNil)
+		getTarget := func(j *simplejson.Json) string {
+			rowObj := j.Get("rows").MustArray()[0]
+			row := simplejson.NewFromAny(rowObj)
+			panelObj := row.Get("panels").MustArray()[0]
+			panel := simplejson.NewFromAny(panelObj)
+			conditionObj := panel.Get("alert").Get("conditions").MustArray()[0]
+			condition := simplejson.NewFromAny(conditionObj)
+			return condition.Get("query").Get("model").Get("target").MustString()
+		}
 
-			dash := m.NewDashboardFromJson(dashJson)
+		require.Equal(t, getTarget(dashJSON), "")
 
-			getTarget := func(j *simplejson.Json) string {
-				rowObj := j.Get("rows").MustArray()[0]
-				row := simplejson.NewFromAny(rowObj)
-				panelObj := row.Get("panels").MustArray()[0]
-				panel := simplejson.NewFromAny(panelObj)
-				conditionObj := panel.Get("alert").Get("conditions").MustArray()[0]
-				condition := simplejson.NewFromAny(conditionObj)
-				return condition.Get("query").Get("model").Get("target").MustString()
-			}
+		extractor := NewDashAlertExtractor(dash, 1, nil)
+		_, _ = extractor.GetAlerts()
 
-			Convey("Dashboard json rows.panels.alert.query.model.target should be empty", func() {
-				So(getTarget(dashJson), ShouldEqual, "")
-			})
+		require.Equal(t, getTarget(dashJSON), "")
+	})
 
-			extractor := NewDashAlertExtractor(dash, 1)
-			_, _ = extractor.GetAlerts()
+	t.Run("Parsing and validating dashboard containing graphite alerts", func(t *testing.T) {
+		dashJSON, err := simplejson.NewJson(json)
+		require.Nil(t, err)
 
-			Convey("Dashboard json should not be updated after extracting rules", func() {
-				So(getTarget(dashJson), ShouldEqual, "")
-			})
-		})
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
 
-		Convey("Parsing and validating dashboard containing graphite alerts", func() {
+		alerts, err := extractor.GetAlerts()
 
-			dashJson, err := simplejson.NewJson([]byte(json))
-			So(err, ShouldBeNil)
+		require.Nil(t, err)
 
-			dash := m.NewDashboardFromJson(dashJson)
-			extractor := NewDashAlertExtractor(dash, 1)
+		require.Len(t, alerts, 2)
 
-			alerts, err := extractor.GetAlerts()
+		for _, v := range alerts {
+			require.EqualValues(t, v.DashboardId, 57)
+			require.NotEmpty(t, v.Name)
+			require.NotEmpty(t, v.Message)
 
-			Convey("Get rules without error", func() {
-				So(err, ShouldBeNil)
-			})
+			settings := simplejson.NewFromAny(v.Settings)
+			require.Equal(t, settings.Get("interval").MustString(""), "")
+		}
 
-			Convey("all properties have been set", func() {
-				So(len(alerts), ShouldEqual, 2)
+		require.EqualValues(t, alerts[0].Handler, 1)
+		require.EqualValues(t, alerts[1].Handler, 0)
 
-				for _, v := range alerts {
-					So(v.DashboardId, ShouldEqual, 57)
-					So(v.Name, ShouldNotBeEmpty)
-					So(v.Message, ShouldNotBeEmpty)
+		require.EqualValues(t, alerts[0].Frequency, 60)
+		require.EqualValues(t, alerts[1].Frequency, 60)
 
-					settings := simplejson.NewFromAny(v.Settings)
-					So(settings.Get("interval").MustString(""), ShouldEqual, "")
-				}
+		require.EqualValues(t, alerts[0].PanelId, 3)
+		require.EqualValues(t, alerts[1].PanelId, 4)
 
-				Convey("should extract handler property", func() {
-					So(alerts[0].Handler, ShouldEqual, 1)
-					So(alerts[1].Handler, ShouldEqual, 0)
-				})
+		require.Equal(t, alerts[0].For, time.Minute*2)
+		require.Equal(t, alerts[1].For, time.Duration(0))
 
-				Convey("should extract frequency in seconds", func() {
-					So(alerts[0].Frequency, ShouldEqual, 60)
-					So(alerts[1].Frequency, ShouldEqual, 60)
-				})
+		require.Equal(t, alerts[0].Name, "name1")
+		require.Equal(t, alerts[0].Message, "desc1")
+		require.Equal(t, alerts[1].Name, "name2")
+		require.Equal(t, alerts[1].Message, "desc2")
 
-				Convey("should extract panel idc", func() {
-					So(alerts[0].PanelId, ShouldEqual, 3)
-					So(alerts[1].PanelId, ShouldEqual, 4)
-				})
+		condition := simplejson.NewFromAny(alerts[0].Settings.Get("conditions").MustArray()[0])
+		query := condition.Get("query")
+		require.EqualValues(t, query.Get("datasourceId").MustInt64(), 12)
 
-				Convey("should extract name and desc", func() {
-					So(alerts[0].Name, ShouldEqual, "name1")
-					So(alerts[0].Message, ShouldEqual, "desc1")
-					So(alerts[1].Name, ShouldEqual, "name2")
-					So(alerts[1].Message, ShouldEqual, "desc2")
-				})
+		condition = simplejson.NewFromAny(alerts[0].Settings.Get("conditions").MustArray()[0])
+		model := condition.Get("query").Get("model")
+		require.Equal(t, model.Get("target").MustString(), "aliasByNode(statsd.fakesite.counters.session_start.desktop.count, 4)")
+	})
 
-				Convey("should set datasourceId", func() {
-					condition := simplejson.NewFromAny(alerts[0].Settings.Get("conditions").MustArray()[0])
-					query := condition.Get("query")
-					So(query.Get("datasourceId").MustInt64(), ShouldEqual, 12)
-				})
+	t.Run("Panels missing id should return error", func(t *testing.T) {
+		panelWithoutID, err := ioutil.ReadFile("./testdata/panels-missing-id.json")
+		require.Nil(t, err)
 
-				Convey("should copy query model to condition", func() {
-					condition := simplejson.NewFromAny(alerts[0].Settings.Get("conditions").MustArray()[0])
-					model := condition.Get("query").Get("model")
-					So(model.Get("target").MustString(), ShouldEqual, "aliasByNode(statsd.fakesite.counters.session_start.desktop.count, 4)")
-				})
-			})
-		})
+		dashJSON, err := simplejson.NewJson(panelWithoutID)
+		require.Nil(t, err)
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
 
-		Convey("Parse and validate dashboard containing influxdb alert", func() {
+		_, err = extractor.GetAlerts()
 
-			json2 := `{
-				  "id": 4,
-				  "title": "Influxdb",
-				  "tags": [
-				    "apa"
-				  ],
-				  "style": "dark",
-				  "timezone": "browser",
-				  "editable": true,
-				  "hideControls": false,
-				  "sharedCrosshair": false,
-				  "rows": [
-				    {
-				      "collapse": false,
-				      "editable": true,
-				      "height": "450px",
-				      "panels": [
-				        {
-				          "alert": {
-				            "conditions": [
-				              {
-				                "evaluator": {
-				                  "params": [
-				                    10
-				                  ],
-				                  "type": "gt"
-				                },
-				                "query": {
-				                  "params": [
-				                    "B",
-				                    "5m",
-				                    "now"
-				                  ]
-				                },
-				                "reducer": {
-				                  "params": [],
-				                  "type": "avg"
-				                },
-				                "type": "query"
-				              }
-				            ],
-				            "frequency": "3s",
-				            "handler": 1,
-				            "name": "Influxdb",
-				            "noDataState": "no_data",
-				            "notifications": [
-				              {
-				                "id": 6
-				              }
-				            ]
-				          },
-				          "alerting": {},
-				          "aliasColors": {
-				            "logins.count.count": "#890F02"
-				          },
-				          "bars": false,
-				          "datasource": "InfluxDB",
-				          "editable": true,
-				          "error": false,
-				          "fill": 1,
-				          "grid": {},
-				          "id": 1,
-				          "interval": ">10s",
-				          "isNew": true,
-				          "legend": {
-				            "avg": false,
-				            "current": false,
-				            "max": false,
-				            "min": false,
-				            "show": true,
-				            "total": false,
-				            "values": false
-				          },
-				          "lines": true,
-				          "linewidth": 2,
-				          "links": [],
-				          "nullPointMode": "connected",
-				          "percentage": false,
-				          "pointradius": 5,
-				          "points": false,
-				          "renderer": "flot",
-				          "seriesOverrides": [],
-				          "span": 10,
-				          "stack": false,
-				          "steppedLine": false,
-				          "targets": [
-				            {
-				              "dsType": "influxdb",
-				              "groupBy": [
-				                {
-				                  "params": [
-				                    "$interval"
-				                  ],
-				                  "type": "time"
-				                },
-				                {
-				                  "params": [
-				                    "datacenter"
-				                  ],
-				                  "type": "tag"
-				                },
-				                {
-				                  "params": [
-				                    "none"
-				                  ],
-				                  "type": "fill"
-				                }
-				              ],
-				              "hide": false,
-				              "measurement": "logins.count",
-				              "policy": "default",
-				              "query": "SELECT 8 * count(\"value\") FROM \"logins.count\" WHERE $timeFilter GROUP BY time($interval), \"datacenter\" fill(none)",
-				              "rawQuery": true,
-				              "refId": "B",
-				              "resultFormat": "time_series",
-				              "select": [
-				                [
-				                  {
-				                    "params": [
-				                      "value"
-				                    ],
-				                    "type": "field"
-				                  },
-				                  {
-				                    "params": [],
-				                    "type": "count"
-				                  }
-				                ]
-				              ],
-				              "tags": []
-				            },
-				            {
-				              "dsType": "influxdb",
-				              "groupBy": [
-				                {
-				                  "params": [
-				                    "$interval"
-				                  ],
-				                  "type": "time"
-				                },
-				                {
-				                  "params": [
-				                    "null"
-				                  ],
-				                  "type": "fill"
-				                }
-				              ],
-				              "hide": true,
-				              "measurement": "cpu",
-				              "policy": "default",
-				              "refId": "A",
-				              "resultFormat": "time_series",
-				              "select": [
-				                [
-				                  {
-				                    "params": [
-				                      "value"
-				                    ],
-				                    "type": "field"
-				                  },
-				                  {
-				                    "params": [],
-				                    "type": "mean"
-				                  }
-				                ],
-				                [
-				                  {
-				                    "params": [
-				                      "value"
-				                    ],
-				                    "type": "field"
-				                  },
-				                  {
-				                    "params": [],
-				                    "type": "sum"
-				                  }
-				                ]
-				              ],
-				              "tags": []
-				            }
-				          ],
-				          "thresholds": [
-				            {
-				              "colorMode": "critical",
-				              "fill": true,
-				              "line": true,
-				              "op": "gt",
-				              "value": 10
-				            }
-				          ],
-				          "timeFrom": null,
-				          "timeShift": null,
-				          "title": "Panel Title",
-				          "tooltip": {
-				            "msResolution": false,
-				            "ordering": "alphabetical",
-				            "shared": true,
-				            "sort": 0,
-				            "value_type": "cumulative"
-				          },
-				          "type": "graph",
-				          "xaxis": {
-				            "mode": "time",
-				            "name": null,
-				            "show": true,
-				            "values": []
-				          },
-				          "yaxes": [
-				            {
-				              "format": "short",
-				              "logBase": 1,
-				              "max": null,
-				              "min": null,
-				              "show": true
-				            },
-				            {
-				              "format": "short",
-				              "logBase": 1,
-				              "max": null,
-				              "min": null,
-				              "show": true
-				            }
-				          ]
-				        },
-				        {
-				          "editable": true,
-				          "error": false,
-				          "id": 2,
-				          "isNew": true,
-				          "limit": 10,
-				          "links": [],
-				          "show": "current",
-				          "span": 2,
-				          "stateFilter": [
-				            "alerting"
-				          ],
-				          "title": "Alert status",
-				          "type": "alertlist"
-				        }
-				      ],
-				      "title": "Row"
-				    }
-				  ],
-				  "time": {
-				    "from": "now-5m",
-				    "to": "now"
-				  },
-				  "timepicker": {
-				    "now": true,
-				    "refresh_intervals": [
-				      "5s",
-				      "10s",
-				      "30s",
-				      "1m",
-				      "5m",
-				      "15m",
-				      "30m",
-				      "1h",
-				      "2h",
-				      "1d"
-				    ],
-				    "time_options": [
-				      "5m",
-				      "15m",
-				      "1h",
-				      "6h",
-				      "12h",
-				      "24h",
-				      "2d",
-				      "7d",
-				      "30d"
-				    ]
-				  },
-				  "templating": {
-				    "list": []
-				  },
-				  "annotations": {
-				    "list": []
-				  },
-				  "schemaVersion": 13,
-				  "version": 120,
-				  "links": [],
-				  "gnetId": null
-				}`
+		require.NotNil(t, err)
+	})
 
-			dashJson, err := simplejson.NewJson([]byte(json2))
-			So(err, ShouldBeNil)
-			dash := m.NewDashboardFromJson(dashJson)
-			extractor := NewDashAlertExtractor(dash, 1)
+	t.Run("Panels missing id should return error", func(t *testing.T) {
+		panelWithIDZero, err := ioutil.ReadFile("./testdata/panel-with-id-0.json")
+		require.Nil(t, err)
 
-			alerts, err := extractor.GetAlerts()
+		dashJSON, err := simplejson.NewJson(panelWithIDZero)
+		require.Nil(t, err)
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
 
-			Convey("Get rules without error", func() {
-				So(err, ShouldBeNil)
-			})
+		_, err = extractor.GetAlerts()
 
-			Convey("should be able to read interval", func() {
-				So(len(alerts), ShouldEqual, 1)
+		require.NotNil(t, err)
+	})
 
-				for _, alert := range alerts {
-					So(alert.DashboardId, ShouldEqual, 4)
+	t.Run("Panel does not have datasource configured, use the default datasource", func(t *testing.T) {
+		panelWithoutSpecifiedDatasource, err := ioutil.ReadFile("./testdata/panel-without-specified-datasource.json")
+		require.Nil(t, err)
 
-					conditions := alert.Settings.Get("conditions").MustArray()
-					cond := simplejson.NewFromAny(conditions[0])
+		dashJSON, err := simplejson.NewJson(panelWithoutSpecifiedDatasource)
+		require.Nil(t, err)
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
 
-					So(cond.Get("query").Get("model").Get("interval").MustString(), ShouldEqual, ">10s")
-				}
-			})
-		})
+		alerts, err := extractor.GetAlerts()
+		require.Nil(t, err)
+
+		condition := simplejson.NewFromAny(alerts[0].Settings.Get("conditions").MustArray()[0])
+		query := condition.Get("query")
+		require.EqualValues(t, query.Get("datasourceId").MustInt64(), 12)
+	})
+
+	t.Run("Parse alerts from dashboard without rows", func(t *testing.T) {
+		json, err := ioutil.ReadFile("./testdata/v5-dashboard.json")
+		require.Nil(t, err)
+
+		dashJSON, err := simplejson.NewJson(json)
+		require.Nil(t, err)
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
+
+		alerts, err := extractor.GetAlerts()
+		require.Nil(t, err)
+
+		require.Len(t, alerts, 2)
+	})
+
+	t.Run("Alert notifications are in DB", func(t *testing.T) {
+		sqlstore.InitTestDB(t)
+		firstNotification := models.CreateAlertNotificationCommand{Uid: "notifier1", OrgId: 1, Name: "1"}
+		err = sqlstore.CreateAlertNotificationCommand(&firstNotification)
+		require.Nil(t, err)
+		secondNotification := models.CreateAlertNotificationCommand{Uid: "notifier2", OrgId: 1, Name: "2"}
+		err = sqlstore.CreateAlertNotificationCommand(&secondNotification)
+		require.Nil(t, err)
+
+		json, err := ioutil.ReadFile("./testdata/influxdb-alert.json")
+		require.Nil(t, err)
+
+		dashJSON, err := simplejson.NewJson(json)
+		require.Nil(t, err)
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
+
+		alerts, err := extractor.GetAlerts()
+		require.Nil(t, err)
+
+		require.Len(t, alerts, 1)
+
+		for _, alert := range alerts {
+			require.EqualValues(t, alert.DashboardId, 4)
+
+			conditions := alert.Settings.Get("conditions").MustArray()
+			cond := simplejson.NewFromAny(conditions[0])
+
+			require.Equal(t, cond.Get("query").Get("model").Get("interval").MustString(), ">10s")
+		}
+	})
+
+	t.Run("Should be able to extract collapsed panels", func(t *testing.T) {
+		json, err := ioutil.ReadFile("./testdata/collapsed-panels.json")
+		require.Nil(t, err)
+
+		dashJSON, err := simplejson.NewJson(json)
+		require.Nil(t, err)
+
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
+
+		alerts, err := extractor.GetAlerts()
+		require.Nil(t, err)
+
+		require.Len(t, alerts, 4)
+	})
+
+	t.Run("Parse and validate dashboard without id and containing an alert", func(t *testing.T) {
+		json, err := ioutil.ReadFile("./testdata/dash-without-id.json")
+		require.Nil(t, err)
+
+		dashJSON, err := simplejson.NewJson(json)
+		require.Nil(t, err)
+		dash := models.NewDashboardFromJson(dashJSON)
+		extractor := NewDashAlertExtractor(dash, 1, nil)
+
+		err = extractor.ValidateAlerts()
+
+		require.Nil(t, err)
+
+		_, err = extractor.GetAlerts()
+		require.Equal(t, err.Error(), "alert validation error: Panel id is not correct, alertName=Influxdb, panelId=1")
 	})
 }

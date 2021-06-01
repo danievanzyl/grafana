@@ -1,50 +1,76 @@
 package imguploader
 
 import (
+	"context"
 	"fmt"
 	"regexp"
+	"time"
 
+	"github.com/grafana/grafana/pkg/components/imguploader/gcs"
+	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/setting"
 )
 
+const (
+	pngExt                        = ".png"
+	defaultGCSSignedURLExpiration = 7 * 24 * time.Hour // 7 days
+)
+
 type ImageUploader interface {
-	Upload(path string) (string, error)
+	Upload(ctx context.Context, path string) (string, error)
 }
 
 type NopImageUploader struct {
 }
 
-func (NopImageUploader) Upload(path string) (string, error) {
+func (NopImageUploader) Upload(ctx context.Context, path string) (string, error) {
 	return "", nil
 }
 
-func NewImageUploader() (ImageUploader, error) {
+var (
+	logger = log.New("imguploader")
+)
 
+func NewImageUploader() (ImageUploader, error) {
 	switch setting.ImageUploadProvider {
 	case "s3":
-		s3sec, err := setting.Cfg.GetSection("external_image_storage.s3")
+		s3sec, err := setting.Raw.GetSection("external_image_storage.s3")
 		if err != nil {
 			return nil, err
 		}
 
+		endpoint := s3sec.Key("endpoint").MustString("")
+		pathStyleAccess := s3sec.Key("path_style_access").MustBool(false)
+		bucket := s3sec.Key("bucket").MustString("")
+		region := s3sec.Key("region").MustString("")
+		path := s3sec.Key("path").MustString("")
 		bucketUrl := s3sec.Key("bucket_url").MustString("")
 		accessKey := s3sec.Key("access_key").MustString("")
 		secretKey := s3sec.Key("secret_key").MustString("")
-		info, err := getRegionAndBucketFromUrl(bucketUrl)
-		if err != nil {
-			return nil, err
+
+		if path != "" && path[len(path)-1:] != "/" {
+			path += "/"
 		}
 
-		return NewS3Uploader(info.region, info.bucket, "public-read", accessKey, secretKey), nil
+		if bucket == "" || region == "" {
+			info, err := getRegionAndBucketFromUrl(bucketUrl)
+			if err != nil {
+				return nil, err
+			}
+			bucket = info.bucket
+			region = info.region
+		}
+
+		return NewS3Uploader(endpoint, region, bucket, path, "public-read", accessKey, secretKey, pathStyleAccess), nil
 	case "webdav":
-		webdavSec, err := setting.Cfg.GetSection("external_image_storage.webdav")
+		webdavSec, err := setting.Raw.GetSection("external_image_storage.webdav")
 		if err != nil {
 			return nil, err
 		}
 
 		url := webdavSec.Key("url").String()
 		if url == "" {
-			return nil, fmt.Errorf("Could not find url key for image.uploader.webdav")
+			return nil, fmt.Errorf("could not find URL key for image.uploader.webdav")
 		}
 
 		public_url := webdavSec.Key("public_url").String()
@@ -52,6 +78,45 @@ func NewImageUploader() (ImageUploader, error) {
 		password := webdavSec.Key("password").String()
 
 		return NewWebdavImageUploader(url, username, password, public_url)
+	case "gcs":
+		gcssec, err := setting.Raw.GetSection("external_image_storage.gcs")
+		if err != nil {
+			return nil, err
+		}
+
+		keyFile := gcssec.Key("key_file").MustString("")
+		bucketName := gcssec.Key("bucket").MustString("")
+		path := gcssec.Key("path").MustString("")
+		enableSignedURLs := gcssec.Key("enable_signed_urls").MustBool(false)
+		exp := gcssec.Key("signed_url_expiration").MustString("")
+		var suExp time.Duration
+		if exp != "" {
+			suExp, err = time.ParseDuration(exp)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			suExp = defaultGCSSignedURLExpiration
+		}
+
+		return gcs.NewUploader(keyFile, bucketName, path, enableSignedURLs, suExp)
+	case "azure_blob":
+		azureBlobSec, err := setting.Raw.GetSection("external_image_storage.azure_blob")
+		if err != nil {
+			return nil, err
+		}
+
+		account_name := azureBlobSec.Key("account_name").MustString("")
+		account_key := azureBlobSec.Key("account_key").MustString("")
+		container_name := azureBlobSec.Key("container_name").MustString("")
+
+		return NewAzureBlobUploader(account_name, account_key, container_name), nil
+	case "local":
+		return NewLocalImageUploader()
+	}
+
+	if setting.ImageUploadProvider != "" {
+		logger.Error("The external image storage configuration is invalid", "unsupported provider", setting.ImageUploadProvider)
 	}
 
 	return NopImageUploader{}, nil
@@ -88,5 +153,5 @@ func getRegionAndBucketFromUrl(url string) (*s3Info, error) {
 		return info, nil
 	}
 
-	return nil, fmt.Errorf("Could not find bucket setting for image.uploader.s3")
+	return nil, fmt.Errorf("could not find bucket setting for image.uploader.s3")
 }

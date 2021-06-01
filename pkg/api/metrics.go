@@ -2,145 +2,258 @@ package api
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"net/http"
 
-	"github.com/grafana/grafana/pkg/api/dtos"
-	"github.com/grafana/grafana/pkg/bus"
-	"github.com/grafana/grafana/pkg/metrics"
-	"github.com/grafana/grafana/pkg/middleware"
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana/pkg/expr"
 	"github.com/grafana/grafana/pkg/models"
-	"github.com/grafana/grafana/pkg/tsdb"
-	"github.com/grafana/grafana/pkg/tsdb/testdata"
+	"github.com/grafana/grafana/pkg/plugins"
+
+	"github.com/grafana/grafana/pkg/api/dtos"
+	"github.com/grafana/grafana/pkg/api/response"
+	"github.com/grafana/grafana/pkg/bus"
+	"github.com/grafana/grafana/pkg/components/simplejson"
 	"github.com/grafana/grafana/pkg/util"
 )
 
-// POST /api/tsdb/query
-func QueryMetrics(c *middleware.Context, reqDto dtos.MetricRequest) Response {
-	timeRange := tsdb.NewTimeRange(reqDto.From, reqDto.To)
-
-	if len(reqDto.Queries) == 0 {
-		return ApiError(400, "No queries found in query", nil)
+// QueryMetricsV2 returns query metrics.
+// POST /api/ds/query   DataSource query w/ expressions
+func (hs *HTTPServer) QueryMetricsV2(c *models.ReqContext, reqDTO dtos.MetricRequest) response.Response {
+	if len(reqDTO.Queries) == 0 {
+		return response.Error(http.StatusBadRequest, "No queries found in query", nil)
 	}
 
-	dsId, err := reqDto.Queries[0].Get("datasourceId").Int64()
-	if err != nil {
-		return ApiError(400, "Query missing datasourceId", nil)
+	timeRange := plugins.NewDataTimeRange(reqDTO.From, reqDTO.To)
+	request := plugins.DataQuery{
+		TimeRange: &timeRange,
+		Debug:     reqDTO.Debug,
+		User:      c.SignedInUser,
+		Queries:   make([]plugins.DataSubQuery, 0, len(reqDTO.Queries)),
 	}
 
-	dsQuery := models.GetDataSourceByIdQuery{Id: dsId}
-	if err := bus.Dispatch(&dsQuery); err != nil {
-		return ApiError(500, "failed to fetch data source", err)
+	// Loop to see if we have an expression.
+	for _, query := range reqDTO.Queries {
+		if query.Get("datasource").MustString("") == expr.DatasourceName {
+			return hs.handleExpressions(c, reqDTO)
+		}
 	}
 
-	request := &tsdb.Request{TimeRange: timeRange}
+	var ds *models.DataSource
+	for i, query := range reqDTO.Queries {
+		hs.log.Debug("Processing metrics query", "query", query)
 
-	for _, query := range reqDto.Queries {
-		request.Queries = append(request.Queries, &tsdb.Query{
-			RefId:         query.Get("refId").MustString("A"),
+		datasourceID, err := query.Get("datasourceId").Int64()
+		if err != nil {
+			hs.log.Debug("Can't process query since it's missing data source ID")
+			return response.Error(http.StatusBadRequest, "Query missing data source ID", nil)
+		}
+
+		// For mixed datasource case, each data source is sent in a single request.
+		// So only the datasource from the first query is needed. As all requests
+		// should be the same data source.
+		if i == 0 {
+			ds, err = hs.DatasourceCache.GetDatasource(datasourceID, c.SignedInUser, c.SkipCache)
+			if err != nil {
+				return hs.handleGetDataSourceError(err, datasourceID)
+			}
+		}
+
+		request.Queries = append(request.Queries, plugins.DataSubQuery{
+			RefID:         query.Get("refId").MustString("A"),
 			MaxDataPoints: query.Get("maxDataPoints").MustInt64(100),
-			IntervalMs:    query.Get("intervalMs").MustInt64(1000),
+			IntervalMS:    query.Get("intervalMs").MustInt64(1000),
+			QueryType:     query.Get("queryType").MustString(""),
 			Model:         query,
-			DataSource:    dsQuery.Result,
+			DataSource:    ds,
 		})
 	}
 
-	resp, err := tsdb.HandleRequest(context.Background(), request)
+	err := hs.PluginRequestValidator.Validate(ds.Url, nil)
 	if err != nil {
-		return ApiError(500, "Metric request error", err)
+		return response.Error(http.StatusForbidden, "Access denied", err)
 	}
 
-	statusCode := 200
+	resp, err := hs.DataService.HandleRequest(c.Req.Context(), ds, request)
+	if err != nil {
+		return response.Error(http.StatusInternalServerError, "Metric request error", err)
+	}
+
+	// This is insanity... but ¯\_(ツ)_/¯, the current query path looks like:
+	//  encodeJson( decodeBase64( encodeBase64( decodeArrow( encodeArrow(frame)) ) )
+	// this will soon change to a more direct route
+	qdr, err := resp.ToBackendDataResponse()
+	if err != nil {
+		return response.Error(http.StatusInternalServerError, "error converting results", err)
+	}
+	return toMacronResponse(qdr)
+}
+
+func toMacronResponse(qdr *backend.QueryDataResponse) response.Response {
+	statusCode := http.StatusOK
+	for _, res := range qdr.Responses {
+		if res.Error != nil {
+			statusCode = http.StatusBadRequest
+		}
+	}
+
+	return response.JSONStreaming(statusCode, qdr)
+}
+
+// handleExpressions handles POST /api/ds/query when there is an expression.
+func (hs *HTTPServer) handleExpressions(c *models.ReqContext, reqDTO dtos.MetricRequest) response.Response {
+	timeRange := plugins.NewDataTimeRange(reqDTO.From, reqDTO.To)
+	request := plugins.DataQuery{
+		TimeRange: &timeRange,
+		Debug:     reqDTO.Debug,
+		User:      c.SignedInUser,
+		Queries:   make([]plugins.DataSubQuery, 0, len(reqDTO.Queries)),
+	}
+
+	for _, query := range reqDTO.Queries {
+		hs.log.Debug("Processing metrics query", "query", query)
+		name := query.Get("datasource").MustString("")
+
+		datasourceID, err := query.Get("datasourceId").Int64()
+		if err != nil {
+			hs.log.Debug("Can't process query since it's missing data source ID")
+			return response.Error(400, "Query missing data source ID", nil)
+		}
+
+		if name != expr.DatasourceName {
+			// Expression requests have everything in one request, so need to check
+			// all data source queries for possible permission / not found issues.
+			if _, err = hs.DatasourceCache.GetDatasource(datasourceID, c.SignedInUser, c.SkipCache); err != nil {
+				return hs.handleGetDataSourceError(err, datasourceID)
+			}
+		}
+
+		request.Queries = append(request.Queries, plugins.DataSubQuery{
+			RefID:         query.Get("refId").MustString("A"),
+			MaxDataPoints: query.Get("maxDataPoints").MustInt64(100),
+			IntervalMS:    query.Get("intervalMs").MustInt64(1000),
+			QueryType:     query.Get("queryType").MustString(""),
+			Model:         query,
+		})
+	}
+
+	exprService := expr.Service{
+		Cfg:         hs.Cfg,
+		DataService: hs.DataService,
+	}
+	qdr, err := exprService.WrapTransformData(c.Req.Context(), request)
+	if err != nil {
+		return response.Error(500, "expression request error", err)
+	}
+	return toMacronResponse(qdr)
+}
+
+func (hs *HTTPServer) handleGetDataSourceError(err error, datasourceID int64) *response.NormalResponse {
+	hs.log.Debug("Encountered error getting data source", "err", err, "id", datasourceID)
+	if errors.Is(err, models.ErrDataSourceAccessDenied) {
+		return response.Error(403, "Access denied to data source", err)
+	}
+	if errors.Is(err, models.ErrDataSourceNotFound) {
+		return response.Error(400, "Invalid data source ID", err)
+	}
+	return response.Error(500, "Unable to load data source metadata", err)
+}
+
+// QueryMetrics returns query metrics
+// POST /api/tsdb/query
+func (hs *HTTPServer) QueryMetrics(c *models.ReqContext, reqDto dtos.MetricRequest) response.Response {
+	if len(reqDto.Queries) == 0 {
+		return response.Error(http.StatusBadRequest, "No queries found in query", nil)
+	}
+
+	datasourceId, err := reqDto.Queries[0].Get("datasourceId").Int64()
+	if err != nil {
+		return response.Error(http.StatusBadRequest, "Query missing datasourceId", nil)
+	}
+
+	ds, err := hs.DatasourceCache.GetDatasource(datasourceId, c.SignedInUser, c.SkipCache)
+	if err != nil {
+		return hs.handleGetDataSourceError(err, datasourceId)
+	}
+
+	err = hs.PluginRequestValidator.Validate(ds.Url, nil)
+	if err != nil {
+		return response.Error(http.StatusForbidden, "Access denied", err)
+	}
+
+	timeRange := plugins.NewDataTimeRange(reqDto.From, reqDto.To)
+	request := plugins.DataQuery{
+		TimeRange: &timeRange,
+		Debug:     reqDto.Debug,
+		User:      c.SignedInUser,
+	}
+
+	for _, query := range reqDto.Queries {
+		request.Queries = append(request.Queries, plugins.DataSubQuery{
+			RefID:         query.Get("refId").MustString("A"),
+			MaxDataPoints: query.Get("maxDataPoints").MustInt64(100),
+			IntervalMS:    query.Get("intervalMs").MustInt64(1000),
+			Model:         query,
+			DataSource:    ds,
+		})
+	}
+
+	resp, err := hs.DataService.HandleRequest(c.Req.Context(), ds, request)
+	if err != nil {
+		return response.Error(http.StatusInternalServerError, "Metric request error", err)
+	}
+
+	statusCode := http.StatusOK
 	for _, res := range resp.Results {
 		if res.Error != nil {
 			res.ErrorString = res.Error.Error()
 			resp.Message = res.ErrorString
-			statusCode = 500
+			statusCode = http.StatusBadRequest
 		}
 	}
 
-	return Json(statusCode, &resp)
-}
-
-// GET /api/tsdb/testdata/scenarios
-func GetTestDataScenarios(c *middleware.Context) Response {
-	result := make([]interface{}, 0)
-
-	for _, scenario := range testdata.ScenarioRegistry {
-		result = append(result, map[string]interface{}{
-			"id":          scenario.Id,
-			"name":        scenario.Name,
-			"description": scenario.Description,
-			"stringInput": scenario.StringInput,
-		})
-	}
-
-	return Json(200, &result)
-}
-
-func GetInternalMetrics(c *middleware.Context) Response {
-	if metrics.UseNilMetrics {
-		return Json(200, util.DynMap{"message": "Metrics disabled"})
-	}
-
-	snapshots := metrics.MetricStats.GetSnapshots()
-
-	resp := make(map[string]interface{})
-
-	for _, m := range snapshots {
-		metricName := m.Name() + m.StringifyTags()
-
-		switch metric := m.(type) {
-		case metrics.Gauge:
-			resp[metricName] = map[string]interface{}{
-				"value": metric.Value(),
-			}
-		case metrics.Counter:
-			resp[metricName] = map[string]interface{}{
-				"count": metric.Count(),
-			}
-		case metrics.Timer:
-			percentiles := metric.Percentiles([]float64{0.25, 0.75, 0.90, 0.99})
-			resp[metricName] = map[string]interface{}{
-				"count": metric.Count(),
-				"min":   metric.Min(),
-				"max":   metric.Max(),
-				"mean":  metric.Mean(),
-				"std":   metric.StdDev(),
-				"p25":   percentiles[0],
-				"p75":   percentiles[1],
-				"p90":   percentiles[2],
-				"p99":   percentiles[3],
-			}
-		}
-	}
-
-	var b []byte
-	var err error
-	if b, err = json.MarshalIndent(resp, "", " "); err != nil {
-		return ApiError(500, "body json marshal", err)
-	}
-
-	return &NormalResponse{
-		body:   b,
-		status: 200,
-		header: http.Header{
-			"Content-Type": []string{"application/json"},
-		},
-	}
-}
-
-// Genereates a index out of range error
-func GenerateError(c *middleware.Context) Response {
-	var array []string
-	return Json(200, array[20])
+	return response.JSON(statusCode, &resp)
 }
 
 // GET /api/tsdb/testdata/gensql
-func GenerateSqlTestData(c *middleware.Context) Response {
-	if err := bus.Dispatch(&models.InsertSqlTestDataCommand{}); err != nil {
-		return ApiError(500, "Failed to insert test data", err)
+func GenerateSQLTestData(c *models.ReqContext) response.Response {
+	if err := bus.Dispatch(&models.InsertSQLTestDataCommand{}); err != nil {
+		return response.Error(500, "Failed to insert test data", err)
 	}
 
-	return Json(200, &util.DynMap{"message": "OK"})
+	return response.JSON(200, &util.DynMap{"message": "OK"})
+}
+
+// GET /api/tsdb/testdata/random-walk
+func (hs *HTTPServer) GetTestDataRandomWalk(c *models.ReqContext) response.Response {
+	from := c.Query("from")
+	to := c.Query("to")
+	intervalMS := c.QueryInt64("intervalMs")
+
+	timeRange := plugins.NewDataTimeRange(from, to)
+	request := plugins.DataQuery{TimeRange: &timeRange}
+
+	dsInfo := &models.DataSource{
+		Type:     "testdata",
+		JsonData: simplejson.New(),
+	}
+	request.Queries = append(request.Queries, plugins.DataSubQuery{
+		RefID:      "A",
+		IntervalMS: intervalMS,
+		Model: simplejson.NewFromAny(&util.DynMap{
+			"scenario": "random_walk",
+		}),
+		DataSource: dsInfo,
+	})
+
+	resp, err := hs.DataService.HandleRequest(context.Background(), dsInfo, request)
+	if err != nil {
+		return response.Error(500, "Metric request error", err)
+	}
+
+	qdr, err := resp.ToBackendDataResponse()
+	if err != nil {
+		return response.Error(http.StatusInternalServerError, "error converting results", err)
+	}
+	return toMacronResponse(qdr)
 }

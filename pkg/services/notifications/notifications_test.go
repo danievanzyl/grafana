@@ -3,42 +3,34 @@ package notifications
 import (
 	"testing"
 
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/bus"
+	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
-	. "github.com/smartystreets/goconvey/convey"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-type testTriggeredAlert struct {
-	ActualValue float64
-	Name        string
-	State       string
-}
+func TestNotificationService(t *testing.T) {
+	ns := &NotificationService{
+		Cfg: setting.NewCfg(),
+	}
+	ns.Cfg.StaticRootPath = "../../../public/"
+	ns.Cfg.Smtp.Enabled = true
+	ns.Cfg.Smtp.TemplatesPattern = "emails/*.html"
+	ns.Cfg.Smtp.FromAddress = "from@address.com"
+	ns.Cfg.Smtp.FromName = "Grafana Admin"
+	ns.Bus = bus.New()
 
-func TestNotifications(t *testing.T) {
+	err := ns.Init()
+	require.NoError(t, err)
 
-	Convey("Given the notifications service", t, func() {
-		//bus.ClearBusHandlers()
+	t.Run("When sending reset email password", func(t *testing.T) {
+		err := ns.sendResetPasswordEmail(&models.SendResetPasswordEmailCommand{User: &models.User{Email: "asd@asd.com"}})
+		require.NoError(t, err)
 
-		setting.StaticRootPath = "../../../public/"
-		setting.Smtp.Enabled = true
-		setting.Smtp.TemplatesPattern = "emails/*.html"
-		setting.Smtp.FromAddress = "from@address.com"
-		setting.Smtp.FromName = "Grafana Admin"
-
-		err := Init()
-		So(err, ShouldBeNil)
-
-		var sentMsg *Message
-		addToMailQueue = func(msg *Message) {
-			sentMsg = msg
-		}
-
-		Convey("When sending reset email password", func() {
-			err := sendResetPasswordEmail(&m.SendResetPasswordEmailCommand{User: &m.User{Email: "asd@asd.com"}})
-			So(err, ShouldBeNil)
-			So(sentMsg.Body, ShouldContainSubstring, "body")
-			So(sentMsg.Subject, ShouldEqual, "Reset your Grafana password - asd@asd.com")
-			So(sentMsg.Body, ShouldNotContainSubstring, "Subject")
-		})
+		sentMsg := <-ns.mailQueue
+		assert.Contains(t, sentMsg.Body, "body")
+		assert.Equal(t, "Reset your Grafana password - asd@asd.com", sentMsg.Subject)
+		assert.NotContains(t, sentMsg.Body, "Subject")
 	})
 }

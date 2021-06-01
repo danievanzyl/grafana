@@ -2,20 +2,22 @@ package sqlstore
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/go-xorm/xorm"
 	"github.com/grafana/grafana/pkg/bus"
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 )
+
+// timeNow makes it possible to test usage of time
+var timeNow = time.Now
 
 func init() {
 	bus.AddHandler("sql", SaveAlerts)
 	bus.AddHandler("sql", HandleAlertsQuery)
 	bus.AddHandler("sql", GetAlertById)
-	bus.AddHandler("sql", DeleteAlertById)
 	bus.AddHandler("sql", GetAllAlertQueryHandler)
 	bus.AddHandler("sql", SetAlertState)
 	bus.AddHandler("sql", GetAlertStatesForDashboard)
@@ -23,9 +25,9 @@ func init() {
 	bus.AddHandler("sql", PauseAllAlerts)
 }
 
-func GetAlertById(query *m.GetAlertByIdQuery) error {
-	alert := m.Alert{}
-	has, err := x.Id(query.Id).Get(&alert)
+func GetAlertById(query *models.GetAlertByIdQuery) error {
+	alert := models.Alert{}
+	has, err := x.ID(query.Id).Get(&alert)
 	if !has {
 		return fmt.Errorf("could not find alert")
 	}
@@ -37,9 +39,9 @@ func GetAlertById(query *m.GetAlertByIdQuery) error {
 	return nil
 }
 
-func GetAllAlertQueryHandler(query *m.GetAllAlertsQuery) error {
-	var alerts []*m.Alert
-	err := x.Sql("select * from alert").Find(&alerts)
+func GetAllAlertQueryHandler(query *models.GetAllAlertsQuery) error {
+	var alerts []*models.Alert
+	err := x.SQL("select * from alert").Find(&alerts)
 	if err != nil {
 		return err
 	}
@@ -48,7 +50,7 @@ func GetAllAlertQueryHandler(query *m.GetAllAlertsQuery) error {
 	return nil
 }
 
-func deleteAlertByIdInternal(alertId int64, reason string, sess *xorm.Session) error {
+func deleteAlertByIdInternal(alertId int64, reason string, sess *DBSession) error {
 	sqlog.Debug("Deleting alert", "id", alertId, "reason", reason)
 
 	if _, err := sess.Exec("DELETE FROM alert WHERE id = ?", alertId); err != nil {
@@ -59,57 +61,82 @@ func deleteAlertByIdInternal(alertId int64, reason string, sess *xorm.Session) e
 		return err
 	}
 
+	if _, err := sess.Exec("DELETE FROM alert_notification_state WHERE alert_id = ?", alertId); err != nil {
+		return err
+	}
+
+	if _, err := sess.Exec("DELETE FROM alert_rule_tag WHERE alert_id = ?", alertId); err != nil {
+		return err
+	}
+
 	return nil
 }
 
-func DeleteAlertById(cmd *m.DeleteAlertCommand) error {
-	return inTransaction(func(sess *xorm.Session) error {
-		return deleteAlertByIdInternal(cmd.AlertId, "DeleteAlertCommand", sess)
-	})
-}
+func HandleAlertsQuery(query *models.GetAlertsQuery) error {
+	builder := SQLBuilder{}
 
-func HandleAlertsQuery(query *m.GetAlertsQuery) error {
-	var sql bytes.Buffer
-	params := make([]interface{}, 0)
+	builder.Write(`SELECT
+		alert.id,
+		alert.dashboard_id,
+		alert.panel_id,
+		alert.name,
+		alert.state,
+		alert.new_state_date,
+		alert.eval_data,
+		alert.eval_date,
+		alert.execution_error,
+		dashboard.uid as dashboard_uid,
+		dashboard.slug as dashboard_slug
+		FROM alert
+		INNER JOIN dashboard on dashboard.id = alert.dashboard_id `)
 
-	sql.WriteString(`SELECT *
-						from alert
-						`)
+	builder.Write(`WHERE alert.org_id = ?`, query.OrgId)
 
-	sql.WriteString(`WHERE org_id = ?`)
-	params = append(params, query.OrgId)
+	if len(strings.TrimSpace(query.Query)) > 0 {
+		builder.Write(" AND alert.name "+dialect.LikeStr()+" ?", "%"+query.Query+"%")
+	}
 
-	if query.DashboardId != 0 {
-		sql.WriteString(` AND dashboard_id = ?`)
-		params = append(params, query.DashboardId)
+	if len(query.DashboardIDs) > 0 {
+		builder.sql.WriteString(` AND alert.dashboard_id IN (?` + strings.Repeat(",?", len(query.DashboardIDs)-1) + `) `)
+
+		for _, dbID := range query.DashboardIDs {
+			builder.AddParams(dbID)
+		}
 	}
 
 	if query.PanelId != 0 {
-		sql.WriteString(` AND panel_id = ?`)
-		params = append(params, query.PanelId)
+		builder.Write(` AND alert.panel_id = ?`, query.PanelId)
 	}
 
-	if len(query.State) > 0 && query.State[0] != "ALL" {
-		sql.WriteString(` AND (`)
+	if len(query.State) > 0 && query.State[0] != "all" {
+		builder.Write(` AND (`)
 		for i, v := range query.State {
 			if i > 0 {
-				sql.WriteString(" OR ")
+				builder.Write(" OR ")
 			}
-			sql.WriteString("state = ? ")
-			params = append(params, v)
+			if strings.HasPrefix(v, "not_") {
+				builder.Write("state <> ? ")
+				v = strings.TrimPrefix(v, "not_")
+			} else {
+				builder.Write("state = ? ")
+			}
+			builder.AddParams(v)
 		}
-		sql.WriteString(")")
+		builder.Write(")")
 	}
+
+	if query.User.OrgRole != models.ROLE_ADMIN {
+		builder.WriteDashboardPermissionFilter(query.User, models.PERMISSION_VIEW)
+	}
+
+	builder.Write(" ORDER BY name ASC")
 
 	if query.Limit != 0 {
-		sql.WriteString(" LIMIT ?")
-		params = append(params, query.Limit)
+		builder.Write(dialect.Limit(query.Limit))
 	}
 
-	sql.WriteString(" ORDER BY name ASC")
-
-	alerts := make([]*m.Alert, 0)
-	if err := x.Sql(sql.String(), params...).Find(&alerts); err != nil {
+	alerts := make([]*models.AlertListItemDTO, 0)
+	if err := x.SQL(builder.GetSQLString(), builder.params...).Find(&alerts); err != nil {
 		return err
 	}
 
@@ -123,29 +150,35 @@ func HandleAlertsQuery(query *m.GetAlertsQuery) error {
 	return nil
 }
 
-func DeleteAlertDefinition(dashboardId int64, sess *xorm.Session) error {
-	alerts := make([]*m.Alert, 0)
-	sess.Where("dashboard_id = ?", dashboardId).Find(&alerts)
+func deleteAlertDefinition(dashboardId int64, sess *DBSession) error {
+	alerts := make([]*models.Alert, 0)
+	if err := sess.Where("dashboard_id = ?", dashboardId).Find(&alerts); err != nil {
+		return err
+	}
 
 	for _, alert := range alerts {
-		deleteAlertByIdInternal(alert.Id, "Dashboard deleted", sess)
+		if err := deleteAlertByIdInternal(alert.Id, "Dashboard deleted", sess); err != nil {
+			// If we return an error, the current transaction gets rolled back, so no use
+			// trying to delete more
+			return err
+		}
 	}
 
 	return nil
 }
 
-func SaveAlerts(cmd *m.SaveAlertsCommand) error {
-	return inTransaction(func(sess *xorm.Session) error {
-		existingAlerts, err := GetAlertsByDashboardId2(cmd.DashboardId, sess)
+func (ss *SQLStore) SaveAlerts(dashID int64, alerts []*models.Alert) error {
+	return ss.WithTransactionalDbSession(context.Background(), func(sess *DBSession) error {
+		existingAlerts, err := GetAlertsByDashboardId2(dashID, sess)
 		if err != nil {
 			return err
 		}
 
-		if err := upsertAlerts(existingAlerts, cmd, sess); err != nil {
+		if err := updateAlerts(existingAlerts, alerts, sess); err != nil {
 			return err
 		}
 
-		if err := deleteMissingAlerts(existingAlerts, cmd, sess); err != nil {
+		if err := deleteMissingAlerts(existingAlerts, alerts, sess); err != nil {
 			return err
 		}
 
@@ -153,10 +186,29 @@ func SaveAlerts(cmd *m.SaveAlertsCommand) error {
 	})
 }
 
-func upsertAlerts(existingAlerts []*m.Alert, cmd *m.SaveAlertsCommand, sess *xorm.Session) error {
-	for _, alert := range cmd.Alerts {
+func SaveAlerts(cmd *models.SaveAlertsCommand) error {
+	return inTransaction(func(sess *DBSession) error {
+		existingAlerts, err := GetAlertsByDashboardId2(cmd.DashboardId, sess)
+		if err != nil {
+			return err
+		}
+
+		if err := updateAlerts(existingAlerts, cmd.Alerts, sess); err != nil {
+			return err
+		}
+
+		if err := deleteMissingAlerts(existingAlerts, cmd.Alerts, sess); err != nil {
+			return err
+		}
+
+		return nil
+	})
+}
+
+func updateAlerts(existingAlerts []*models.Alert, alerts []*models.Alert, sess *DBSession) error {
+	for _, alert := range alerts {
 		update := false
-		var alertToUpdate *m.Alert
+		var alertToUpdate *models.Alert
 
 		for _, k := range existingAlerts {
 			if alert.PanelId == k.PanelId {
@@ -169,10 +221,11 @@ func upsertAlerts(existingAlerts []*m.Alert, cmd *m.SaveAlertsCommand, sess *xor
 
 		if update {
 			if alertToUpdate.ContainsUpdates(alert) {
-				alert.Updated = time.Now()
+				alert.Updated = timeNow()
 				alert.State = alertToUpdate.State
-				sess.MustCols("message")
-				_, err := sess.Id(alert.Id).Update(alert)
+				sess.MustCols("message", "for")
+
+				_, err := sess.ID(alert.Id).Update(alert)
 				if err != nil {
 					return err
 				}
@@ -180,10 +233,10 @@ func upsertAlerts(existingAlerts []*m.Alert, cmd *m.SaveAlertsCommand, sess *xor
 				sqlog.Debug("Alert updated", "name", alert.Name, "id", alert.Id)
 			}
 		} else {
-			alert.Updated = time.Now()
-			alert.Created = time.Now()
-			alert.State = m.AlertStatePending
-			alert.NewStateDate = time.Now()
+			alert.Updated = timeNow()
+			alert.Created = timeNow()
+			alert.State = models.AlertStateUnknown
+			alert.NewStateDate = timeNow()
 
 			_, err := sess.Insert(alert)
 			if err != nil {
@@ -192,16 +245,31 @@ func upsertAlerts(existingAlerts []*m.Alert, cmd *m.SaveAlertsCommand, sess *xor
 
 			sqlog.Debug("Alert inserted", "name", alert.Name, "id", alert.Id)
 		}
+		tags := alert.GetTagsFromSettings()
+		if _, err := sess.Exec("DELETE FROM alert_rule_tag WHERE alert_id = ?", alert.Id); err != nil {
+			return err
+		}
+		if tags != nil {
+			tags, err := EnsureTagsExist(sess, tags)
+			if err != nil {
+				return err
+			}
+			for _, tag := range tags {
+				if _, err := sess.Exec("INSERT INTO alert_rule_tag (alert_id, tag_id) VALUES(?,?)", alert.Id, tag.Id); err != nil {
+					return err
+				}
+			}
+		}
 	}
 
 	return nil
 }
 
-func deleteMissingAlerts(alerts []*m.Alert, cmd *m.SaveAlertsCommand, sess *xorm.Session) error {
+func deleteMissingAlerts(alerts []*models.Alert, existingAlerts []*models.Alert, sess *DBSession) error {
 	for _, missingAlert := range alerts {
 		missing := true
 
-		for _, k := range cmd.Alerts {
+		for _, k := range existingAlerts {
 			if missingAlert.PanelId == k.PanelId {
 				missing = false
 				break
@@ -209,60 +277,69 @@ func deleteMissingAlerts(alerts []*m.Alert, cmd *m.SaveAlertsCommand, sess *xorm
 		}
 
 		if missing {
-			deleteAlertByIdInternal(missingAlert.Id, "Removed from dashboard", sess)
+			if err := deleteAlertByIdInternal(missingAlert.Id, "Removed from dashboard", sess); err != nil {
+				// No use trying to delete more, since we're in a transaction and it will be
+				// rolled back on error.
+				return err
+			}
 		}
 	}
 
 	return nil
 }
 
-func GetAlertsByDashboardId2(dashboardId int64, sess *xorm.Session) ([]*m.Alert, error) {
-	alerts := make([]*m.Alert, 0)
+func GetAlertsByDashboardId2(dashboardId int64, sess *DBSession) ([]*models.Alert, error) {
+	alerts := make([]*models.Alert, 0)
 	err := sess.Where("dashboard_id = ?", dashboardId).Find(&alerts)
 
 	if err != nil {
-		return []*m.Alert{}, err
+		return []*models.Alert{}, err
 	}
 
 	return alerts, nil
 }
 
-func SetAlertState(cmd *m.SetAlertStateCommand) error {
-	return inTransaction(func(sess *xorm.Session) error {
-		alert := m.Alert{}
+func SetAlertState(cmd *models.SetAlertStateCommand) error {
+	return inTransaction(func(sess *DBSession) error {
+		alert := models.Alert{}
 
-		if has, err := sess.Id(cmd.AlertId).Get(&alert); err != nil {
+		if has, err := sess.ID(cmd.AlertId).Get(&alert); err != nil {
 			return err
 		} else if !has {
-			return fmt.Errorf("Could not find alert")
+			return fmt.Errorf("could not find alert")
 		}
 
-		if alert.State == m.AlertStatePaused {
-			return m.ErrCannotChangeStateOnPausedAlert
+		if alert.State == models.AlertStatePaused {
+			return models.ErrCannotChangeStateOnPausedAlert
 		}
 
 		if alert.State == cmd.State {
-			return m.ErrRequiresNewState
+			return models.ErrRequiresNewState
 		}
 
 		alert.State = cmd.State
-		alert.StateChanges += 1
-		alert.NewStateDate = time.Now()
+		alert.StateChanges++
+		alert.NewStateDate = timeNow()
 		alert.EvalData = cmd.EvalData
 
 		if cmd.Error == "" {
-			alert.ExecutionError = " " //without this space, xorm skips updating this field
+			alert.ExecutionError = " " // without this space, xorm skips updating this field
 		} else {
 			alert.ExecutionError = cmd.Error
 		}
 
-		sess.Id(alert.Id).Update(&alert)
+		_, err := sess.ID(alert.Id).Update(&alert)
+		if err != nil {
+			return err
+		}
+
+		cmd.Result = alert
 		return nil
 	})
 }
 
-func PauseAlert(cmd *m.PauseAlertCommand) error {
-	return inTransaction(func(sess *xorm.Session) error {
+func PauseAlert(cmd *models.PauseAlertCommand) error {
+	return inTransaction(func(sess *DBSession) error {
 		if len(cmd.AlertIds) == 0 {
 			return fmt.Errorf("command contains no alertids")
 		}
@@ -270,11 +347,13 @@ func PauseAlert(cmd *m.PauseAlertCommand) error {
 		var buffer bytes.Buffer
 		params := make([]interface{}, 0)
 
-		buffer.WriteString(`UPDATE alert SET state = ?`)
+		buffer.WriteString(`UPDATE alert SET state = ?, new_state_date = ?`)
 		if cmd.Paused {
-			params = append(params, string(m.AlertStatePaused))
+			params = append(params, string(models.AlertStatePaused))
+			params = append(params, timeNow().UTC())
 		} else {
-			params = append(params, string(m.AlertStatePending))
+			params = append(params, string(models.AlertStateUnknown))
+			params = append(params, timeNow().UTC())
 		}
 
 		buffer.WriteString(` WHERE id IN (?` + strings.Repeat(",?", len(cmd.AlertIds)-1) + `)`)
@@ -282,7 +361,9 @@ func PauseAlert(cmd *m.PauseAlertCommand) error {
 			params = append(params, v)
 		}
 
-		res, err := sess.Exec(buffer.String(), params...)
+		sqlOrArgs := append([]interface{}{buffer.String()}, params...)
+
+		res, err := sess.Exec(sqlOrArgs...)
 		if err != nil {
 			return err
 		}
@@ -291,16 +372,16 @@ func PauseAlert(cmd *m.PauseAlertCommand) error {
 	})
 }
 
-func PauseAllAlerts(cmd *m.PauseAllAlertCommand) error {
-	return inTransaction(func(sess *xorm.Session) error {
+func PauseAllAlerts(cmd *models.PauseAllAlertCommand) error {
+	return inTransaction(func(sess *DBSession) error {
 		var newState string
 		if cmd.Paused {
-			newState = string(m.AlertStatePaused)
+			newState = string(models.AlertStatePaused)
 		} else {
-			newState = string(m.AlertStatePending)
+			newState = string(models.AlertStateUnknown)
 		}
 
-		res, err := sess.Exec(`UPDATE alert SET state = ?`, newState)
+		res, err := sess.Exec(`UPDATE alert SET state = ?, new_state_date = ?`, newState, timeNow().UTC())
 		if err != nil {
 			return err
 		}
@@ -309,8 +390,8 @@ func PauseAllAlerts(cmd *m.PauseAllAlertCommand) error {
 	})
 }
 
-func GetAlertStatesForDashboard(query *m.GetAlertStatesForDashboardQuery) error {
-	var rawSql = `SELECT
+func GetAlertStatesForDashboard(query *models.GetAlertStatesForDashboardQuery) error {
+	var rawSQL = `SELECT
 	                id,
 	                dashboard_id,
 	                panel_id,
@@ -319,8 +400,8 @@ func GetAlertStatesForDashboard(query *m.GetAlertStatesForDashboardQuery) error 
 	                FROM alert
 	                WHERE org_id = ? AND dashboard_id = ?`
 
-	query.Result = make([]*m.AlertStateInfoDTO, 0)
-	err := x.Sql(rawSql, query.OrgId, query.DashboardId).Find(&query.Result)
+	query.Result = make([]*models.AlertStateInfoDTO, 0)
+	err := x.SQL(rawSQL, query.OrgId, query.DashboardId).Find(&query.Result)
 
 	return err
 }

@@ -1,35 +1,49 @@
-# Building The Docs
+# Building the docs locally
 
-To build the docs locally, you need to have docker installed.  The
-docs are built using a custom [docker](https://www.docker.com/) image
-and the [mkdocs](http://www.mkdocs.org/) tool.
+When you contribute to documentation, it is a good practice to build the docs on your local machine to make sure your changes appear as you expect. This README explains the process for doing that.
 
-**Prepare the Docker Image**:
+## Requirements
 
-Git clone `grafana/grafana.org` repo. Run these commands in the root of that repo. **Note** that you may require ``sudo``
-when running ``make docs-build`` depending on how your system's docker
-service is configured):
+Docker >= 2.1.0.3
+Yarn >= 1.22.4
 
+## Build the doc site
+
+1. On the command line, first change to the docs folder: `cd docs`.
+1. Run `make docs-quick`. This launches a preview of the website with the current grafana docs at `http://localhost:3002/docs/grafana/next/` which will refresh automatically when changes are made to content in the `sources` directory.
+
+If you have the grafana/website repo checked out in the same directory as the grafana repo, then you can run `make docs-local-static` to use local assets (such as images).
+
+---
+
+## Content guidelines
+
+Edit content in the `sources` directory.
+
+### Using `relref` for internal links
+
+Use the Hugo shortcode [relref](https://gohugo.io/content-management/cross-references/#use-ref-and-relref) any time you are linking to other internal docs pages.
+
+Syntax is:
 ```
-$ git clone https://github.com/grafana/grafana.org
-$ cd grafana.org
-$ make docs-build
+{{< relref "example.md" >}}
 ```
 
-**Build the Documentation**:
-
-Now that the docker image has been prepared we can build the
-docs. Switch your working directory back to the directory this file
-(README.md) is in and run (possibly with ``sudo``):
-
-```
-$ make docs
-```
-
-This command will not return control of the shell to the user. Instead
-the command is now running a new docker container built from the image
-we created in the previous step.
-
-Open [localhost:3004](http://localhost:3004) to view the docs.
+You might need to add more context for the link (containing folders and so on, `folder/example.md`) if Hugo says the relref is ambiguous. 
 
 
+### Edit the side menu
+
+The side menu is automatically build from the file structure. Use the [weight](https://gohugo.io/templates/lists/#by-weight) front matter parameter to order pages.
+
+### Add images
+
+Images are currently hosted in the grafana/website repo.
+
+---
+
+## Deploy changes to grafana.com
+
+When a PR is merged to main with changes in the `docs/sources` directory, those changes are automatically synced to the grafana/website repo and published to the staging site.
+
+Generally, someone from marketing will publish to production each day: so as long as the sync is successful your docs edits will be published. Alternatively, you can refer to [publishing to production](https://github.com/grafana/website#publishing-to-production-grafanacom) if you'd like to do it yourself.

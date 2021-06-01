@@ -1,6 +1,4 @@
-///<reference path="../../../headers/common.d.ts" />
-
-import _ from 'lodash';
+import { clone, each, map } from 'lodash';
 
 export class QueryPartDef {
   type: string;
@@ -30,11 +28,12 @@ export class QueryPart {
     this.part = part;
     this.def = def;
     if (!this.def) {
-      throw {message: 'Could not find query part ' + part.type};
+      throw { message: 'Could not find query part ' + part.type };
     }
 
-    part.params = part.params || _.clone(this.def.defaultParams);
+    part.params = part.params || clone(this.def.defaultParams);
     this.params = part.params;
+    this.text = '';
     this.updateText();
   }
 
@@ -42,7 +41,7 @@ export class QueryPart {
     return this.def.renderer(this, innerExpr);
   }
 
-  hasMultipleParamsInString (strValue, index) {
+  hasMultipleParamsInString(strValue: string, index: number) {
     if (strValue.indexOf(',') === -1) {
       return false;
     }
@@ -50,11 +49,11 @@ export class QueryPart {
     return this.def.params[index + 1] && this.def.params[index + 1].optional;
   }
 
-  updateParam (strValue, index) {
+  updateParam(strValue: string, index: number) {
     // handle optional parameters
     // if string contains ',' and next param is optional, split and update both
     if (this.hasMultipleParamsInString(strValue, index)) {
-      _.each(strValue.split(','), (partVal, idx) => {
+      each(strValue.split(','), (partVal, idx) => {
         this.updateParam(partVal.trim(), idx);
       });
       return;
@@ -76,17 +75,17 @@ export class QueryPart {
       return;
     }
 
-    var text = this.def.type + '(';
+    let text = this.def.type + '(';
     text += this.params.join(', ');
     text += ')';
     this.text = text;
   }
 }
 
-export function functionRenderer(part, innerExpr) {
-  var str = part.def.type + '(';
-  var parameters = _.map(part.params, (value, index) => {
-    var paramType = part.def.params[index];
+export function functionRenderer(part: any, innerExpr: string) {
+  const str = part.def.type + '(';
+  const parameters = map(part.params, (value, index) => {
+    const paramType = part.def.params[index];
     if (paramType.type === 'time') {
       if (value === 'auto') {
         value = '$__interval';
@@ -107,15 +106,14 @@ export function functionRenderer(part, innerExpr) {
   return str + parameters.join(', ') + ')';
 }
 
-
-export function suffixRenderer(part, innerExpr) {
+export function suffixRenderer(part: QueryPartDef, innerExpr: string) {
   return innerExpr + ' ' + part.params[0];
 }
 
-export function identityRenderer(part, innerExpr) {
+export function identityRenderer(part: QueryPartDef, innerExpr: string) {
   return part.params[0];
 }
 
-export function quotedIdentityRenderer(part, innerExpr) {
+export function quotedIdentityRenderer(part: QueryPartDef, innerExpr: string) {
   return '"' + part.params[0] + '"';
 }

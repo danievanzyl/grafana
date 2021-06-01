@@ -5,23 +5,28 @@ import (
 	"strings"
 	"time"
 
-	"github.com/grafana/grafana/pkg/log"
-	"github.com/grafana/grafana/pkg/metrics"
-	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/infra/log"
+	"github.com/grafana/grafana/pkg/infra/metrics"
+	"github.com/grafana/grafana/pkg/plugins"
 )
 
+// DefaultEvalHandler is responsible for evaluating the alert rule.
 type DefaultEvalHandler struct {
 	log             log.Logger
 	alertJobTimeout time.Duration
+	requestHandler  plugins.DataRequestHandler
 }
 
-func NewEvalHandler() *DefaultEvalHandler {
+// NewEvalHandler is the `DefaultEvalHandler` constructor.
+func NewEvalHandler(requestHandler plugins.DataRequestHandler) *DefaultEvalHandler {
 	return &DefaultEvalHandler{
 		log:             log.New("alerting.evalHandler"),
 		alertJobTimeout: time.Second * 5,
+		requestHandler:  requestHandler,
 	}
 }
 
+// Eval evaluated the alert rule.
 func (e *DefaultEvalHandler) Eval(context *EvalContext) {
 	firing := true
 	noDataFound := true
@@ -29,7 +34,7 @@ func (e *DefaultEvalHandler) Eval(context *EvalContext) {
 
 	for i := 0; i < len(context.Rule.Conditions); i++ {
 		condition := context.Rule.Conditions[i]
-		cr, err := condition.Eval(context)
+		cr, err := condition.Eval(context, e.requestHandler)
 		if err != nil {
 			context.Error = err
 		}
@@ -37,6 +42,11 @@ func (e *DefaultEvalHandler) Eval(context *EvalContext) {
 		// break if condition could not be evaluated
 		if context.Error != nil {
 			break
+		}
+
+		if i == 0 {
+			firing = cr.Firing
+			noDataFound = cr.NoDataFound
 		}
 
 		// calculating Firing based on operator
@@ -61,40 +71,7 @@ func (e *DefaultEvalHandler) Eval(context *EvalContext) {
 	context.Firing = firing
 	context.NoDataFound = noDataFound
 	context.EndTime = time.Now()
-	context.Rule.State = e.getNewState(context)
 
-	elapsedTime := context.EndTime.Sub(context.StartTime) / time.Millisecond
-	metrics.M_Alerting_Execution_Time.Update(elapsedTime)
-}
-
-// This should be move into evalContext once its been refactored.
-func (handler *DefaultEvalHandler) getNewState(evalContext *EvalContext) models.AlertStateType {
-	if evalContext.Error != nil {
-		handler.log.Error("Alert Rule Result Error",
-			"ruleId", evalContext.Rule.Id,
-			"name", evalContext.Rule.Name,
-			"error", evalContext.Error,
-			"changing state to", evalContext.Rule.ExecutionErrorState.ToAlertState())
-
-		if evalContext.Rule.ExecutionErrorState == models.ExecutionErrorKeepState {
-			return evalContext.PrevAlertState
-		} else {
-			return evalContext.Rule.ExecutionErrorState.ToAlertState()
-		}
-	} else if evalContext.Firing {
-		return models.AlertStateAlerting
-	} else if evalContext.NoDataFound {
-		handler.log.Info("Alert Rule returned no data",
-			"ruleId", evalContext.Rule.Id,
-			"name", evalContext.Rule.Name,
-			"changing state to", evalContext.Rule.NoDataState.ToAlertState())
-
-		if evalContext.Rule.NoDataState == models.NoDataKeepState {
-			return evalContext.PrevAlertState
-		} else {
-			return evalContext.Rule.NoDataState.ToAlertState()
-		}
-	}
-
-	return models.AlertStateOK
+	elapsedTime := context.EndTime.Sub(context.StartTime).Nanoseconds() / int64(time.Millisecond)
+	metrics.MAlertingExecutionTime.Observe(float64(elapsedTime))
 }

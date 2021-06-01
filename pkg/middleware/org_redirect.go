@@ -4,24 +4,26 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/grafana/grafana/pkg/bus"
 	"github.com/grafana/grafana/pkg/models"
 	"github.com/grafana/grafana/pkg/setting"
-
 	"gopkg.in/macaron.v1"
 )
 
-func OrgRedirect() macaron.Handler {
+// OrgRedirect changes org and redirects users if the
+// querystring `orgId` doesn't match the active org.
+func OrgRedirect(cfg *setting.Cfg) macaron.Handler {
 	return func(res http.ResponseWriter, req *http.Request, c *macaron.Context) {
 		orgIdValue := req.URL.Query().Get("orgId")
-		orgId, err := strconv.ParseInt(orgIdValue, 10, 32)
+		orgId, err := strconv.ParseInt(orgIdValue, 10, 64)
 
 		if err != nil || orgId == 0 {
 			return
 		}
 
-		ctx, ok := c.Data["ctx"].(*Context)
+		ctx, ok := c.Data["ctx"].(*models.ReqContext)
 		if !ok || !ctx.IsSignedIn {
 			return
 		}
@@ -41,7 +43,7 @@ func OrgRedirect() macaron.Handler {
 			return
 		}
 
-		newUrl := setting.ToAbsUrl(fmt.Sprintf("%s?%s", c.Req.URL.Path, c.Req.URL.Query().Encode()))
-		c.Redirect(newUrl, 302)
+		newURL := fmt.Sprintf("%s%s?%s", cfg.AppURL, strings.TrimPrefix(c.Req.URL.Path, "/"), c.Req.URL.Query().Encode())
+		c.Redirect(newURL, 302)
 	}
 }

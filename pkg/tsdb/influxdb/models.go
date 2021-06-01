@@ -1,5 +1,7 @@
 package influxdb
 
+import "time"
+
 type Query struct {
 	Measurement  string
 	Policy       string
@@ -10,8 +12,8 @@ type Query struct {
 	RawQuery     string
 	UseRawQuery  bool
 	Alias        string
-
-	Interval string
+	Interval     time.Duration
+	Tz           string
 }
 
 type Tag struct {
@@ -23,19 +25,15 @@ type Tag struct {
 
 type Select []QueryPart
 
-type InfluxDbSelect struct {
-	Type string
-}
-
 type Response struct {
 	Results []Result
-	Err     error
+	Error   string
 }
 
 type Result struct {
 	Series   []Row
 	Messages []*Message
-	Err      error
+	Error    string
 }
 
 type Message struct {

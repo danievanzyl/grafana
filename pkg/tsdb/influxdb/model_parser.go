@@ -2,9 +2,11 @@ package influxdb
 
 import (
 	"strconv"
+	"time"
 
 	"github.com/grafana/grafana/pkg/components/simplejson"
 	"github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/tsdb/interval"
 )
 
 type InfluxdbQueryParser struct{}
@@ -14,6 +16,7 @@ func (qp *InfluxdbQueryParser) Parse(model *simplejson.Json, dsInfo *models.Data
 	rawQuery := model.Get("query").MustString("")
 	useRawQuery := model.Get("rawQuery").MustBool(false)
 	alias := model.Get("alias").MustString("")
+	tz := model.Get("tz").MustString("")
 
 	measurement := model.Get("measurement").MustString("")
 
@@ -37,12 +40,9 @@ func (qp *InfluxdbQueryParser) Parse(model *simplejson.Json, dsInfo *models.Data
 		return nil, err
 	}
 
-	interval := model.Get("interval").MustString("")
-	if interval == "" && dsInfo.JsonData != nil {
-		dsInterval := dsInfo.JsonData.Get("timeInterval").MustString("")
-		if dsInterval != "" {
-			interval = dsInterval
-		}
+	parsedInterval, err := interval.GetIntervalFrom(dsInfo, model, time.Millisecond*1)
+	if err != nil {
+		return nil, err
 	}
 
 	return &Query{
@@ -53,9 +53,10 @@ func (qp *InfluxdbQueryParser) Parse(model *simplejson.Json, dsInfo *models.Data
 		Tags:         tags,
 		Selects:      selects,
 		RawQuery:     rawQuery,
-		Interval:     interval,
+		Interval:     parsedInterval,
 		Alias:        alias,
 		UseRawQuery:  useRawQuery,
+		Tz:           tz,
 	}, nil
 }
 
@@ -138,7 +139,6 @@ func (*InfluxdbQueryParser) parseQueryPart(model *simplejson.Json) (*QueryPart, 
 		}
 
 		return nil, err
-
 	}
 
 	qp, err := NewQueryPart(typ, params)
@@ -151,14 +151,13 @@ func (*InfluxdbQueryParser) parseQueryPart(model *simplejson.Json) (*QueryPart, 
 
 func (qp *InfluxdbQueryParser) parseGroupBy(model *simplejson.Json) ([]*QueryPart, error) {
 	var result []*QueryPart
-
 	for _, groupObj := range model.Get("groupBy").MustArray() {
 		groupJson := simplejson.NewFromAny(groupObj)
 		queryPart, err := qp.parseQueryPart(groupJson)
-
 		if err != nil {
 			return nil, err
 		}
+
 		result = append(result, queryPart)
 	}
 

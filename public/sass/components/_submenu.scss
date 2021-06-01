@@ -4,12 +4,7 @@
   flex-wrap: wrap;
   align-content: flex-start;
   align-items: flex-start;
-
-  margin: 0 $panel-margin ($panel-margin*2) $panel-margin;
-}
-
-.annotation-disabled, .annotation-disabled a {
-  color: $link-color-disabled;
+  padding: 0 0 $space-sm 0;
 }
 
 .annotation-segment {
@@ -22,77 +17,72 @@
 }
 
 .submenu-item {
-  margin-right: 20px;
   display: inline-block;
   margin-right: 15px;
-  display: inline-block;
-  float: left;
 
   .fa-caret-down {
     font-size: 75%;
-    position: relative;
-    top: -1px;
-    left: 1px;
+    padding-left: 8px;
+  }
+
+  .gf-form {
+    margin-bottom: 0;
   }
 }
 
 .variable-value-link {
+  max-width: 500px;
   padding-right: 10px;
-  padding: 8px 7px;
-  box-sizing: content-box;
-  display: inline-block;
+  padding: 0 $space-sm;
+  background-color: $input-bg;
+  border: 1px solid $input-border-color;
+  border-radius: $input-border-radius;
+  display: flex;
+  align-items: center;
   color: $text-color;
+  height: $input-height;
 
   .label-tag {
     margin: 0 5px;
   }
 }
 
-.variable-link-wrapper  {
+.variable-link-wrapper {
   display: inline-block;
   position: relative;
-
-  .hidden-input {
-    padding: 8px 7px;
-    border: none;
-    margin: 0px;
-    background: transparent;
-    border-radius: 0;
-    border-right: 1px solid $tight-form-border;
-  }
 }
 
 .variable-value-dropdown {
   position: absolute;
-  top: 47px;
+  top: $input-height;
   min-width: 150px;
   max-height: 400px;
   min-height: 150px;
   overflow-y: auto;
   overflow-x: hidden;
   background-color: $dropdownBackground;
-  box-shadow: 0 0 25px 0 rgba(0,0,0,0.4);
-  z-index: 1000;
+  box-shadow: $dropdownShadow;
+  z-index: $zindex-typeahead;
   font-size: $font-size-base;
   border-radius: 3px 3px 0 0;
   border: 1px solid $tight-form-func-bg;
 
   &.multi {
-   .selected {
-     .variable-option-icon{
-       background: url($checkboxImageUrl) 0px -18px no-repeat;
-     }
-   }
- }
+    .selected {
+      .variable-option-icon {
+        background: url($checkboxImageUrl) 0px -18px no-repeat;
+      }
+    }
+  }
 
- &.single {
-   .variable-option-icon {
-     display: none;
-   }
-   .selected {
-     background-color: $tight-form-func-highlight-bg;
-   }
- }
+  &.single {
+    .variable-option-icon {
+      display: none;
+    }
+    .selected {
+      background-color: $tight-form-func-highlight-bg;
+    }
+  }
 }
 
 .variable-options-wrapper {
@@ -140,8 +130,9 @@
 }
 
 .variable-option {
-  &:hover, &.highlighted {
-    background-color: $blue-dark;
+  &:hover,
+  &.highlighted {
+    background-color: $variable-option-bg;
   }
 }
 

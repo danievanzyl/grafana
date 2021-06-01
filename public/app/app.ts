@@ -1,117 +1,167 @@
-///<reference path="headers/common.d.ts" />
+import 'symbol-observable';
+import 'core-js';
+import 'regenerator-runtime/runtime';
 
-import 'bootstrap';
-import 'vendor/filesaver';
-import 'lodash-src';
-import 'angular-strap';
-import 'angular-route';
-import 'angular-sanitize';
-import 'angular-dragdrop';
-import 'angular-bindonce';
-import 'angular-ui';
+import 'whatwg-fetch'; // fetch polyfill needed for PhantomJs rendering
+import 'abortcontroller-polyfill/dist/polyfill-patch-fetch'; // fetch polyfill needed for PhantomJs rendering
+import 'file-saver';
+import 'jquery';
 
-import $ from 'jquery';
-import angular from 'angular';
-import config from 'app/core/config';
+// eslint-disable-next-line lodash/import-scope
 import _ from 'lodash';
-import moment from 'moment';
-import {coreModule} from './core/core';
+import ReactDOM from 'react-dom';
+import React from 'react';
+import config from 'app/core/config';
+// @ts-ignore ignoring this for now, otherwise we would have to extend _ interface with move
+import {
+  locationUtil,
+  monacoLanguageRegistry,
+  setLocale,
+  setTimeZoneResolver,
+  standardEditorsRegistry,
+  standardFieldConfigEditorRegistry,
+  standardTransformersRegistry,
+} from '@grafana/data';
+import { arrayMove } from 'app/core/utils/arrayMove';
+import { importPluginModule } from 'app/features/plugins/plugin_loader';
+import { registerEchoBackend, setEchoSrv, setPanelRenderer, setQueryRunnerFactory } from '@grafana/runtime';
+import { Echo } from './core/services/echo/Echo';
+import { reportPerformance } from './core/services/echo/EchoSrv';
+import { PerformanceBackend } from './core/services/echo/backends/PerformanceBackend';
+import 'app/routes/GrafanaCtrl';
+import 'app/features/all';
+import { getScrollbarWidth, getStandardFieldConfigs, getStandardOptionEditors } from '@grafana/ui';
+import { getDefaultVariableAdapters, variableAdapters } from './features/variables/adapters';
+import { initDevFeatures } from './dev';
+import { getStandardTransformers } from 'app/core/utils/standardTransformers';
+import { SentryEchoBackend } from './core/services/echo/backends/sentry/SentryBackend';
+import { setVariableQueryRunner, VariableQueryRunner } from './features/variables/query/VariableQueryRunner';
+import { configureStore } from './store/configureStore';
+import { AppWrapper } from './AppWrapper';
+import { interceptLinkClicks } from './core/navigation/patch/interceptLinkClicks';
+import { AngularApp } from './angular/AngularApp';
+import { PanelRenderer } from './features/panel/PanelRenderer';
+import { QueryRunner } from './features/query/state/QueryRunner';
+import { getTimeSrv } from './features/dashboard/services/TimeSrv';
+import { getVariablesUrlParams } from './features/variables/getAllVariableValuesForUrl';
+import getDefaultMonacoLanguages from '../lib/monaco-languages';
+
+// add move to lodash for backward compatabilty with plugins
+// @ts-ignore
+_.move = arrayMove;
+
+// import symlinked extensions
+const extensionsIndex = (require as any).context('.', true, /extensions\/index.ts/);
+const extensionsExports = extensionsIndex.keys().map((key: any) => {
+  return extensionsIndex(key);
+});
+
+if (process.env.NODE_ENV === 'development') {
+  initDevFeatures();
+}
 
 export class GrafanaApp {
-  registerFunctions: any;
-  ngModuleDependencies: any[];
-  preBootModules: any[];
+  angularApp: AngularApp;
 
   constructor() {
-    this.preBootModules = [];
-    this.registerFunctions = {};
-    this.ngModuleDependencies = [];
-  }
-
-  useModule(module) {
-    if (this.preBootModules) {
-      this.preBootModules.push(module);
-    } else {
-      _.extend(module, this.registerFunctions);
-    }
-    this.ngModuleDependencies.push(module.name);
-    return module;
+    this.angularApp = new AngularApp();
   }
 
   init() {
-    var app = angular.module('grafana', []);
+    initEchoSrv();
+    addClassIfNoOverlayScrollbar();
+    setLocale(config.bootData.user.locale);
+    setPanelRenderer(PanelRenderer);
+    setTimeZoneResolver(() => config.bootData.user.timezone);
+    // Important that extensions are initialized before store
+    initExtensions();
+    configureStore();
 
-    moment.locale(config.bootData.user.locale);
+    standardEditorsRegistry.setInit(getStandardOptionEditors);
+    standardFieldConfigEditorRegistry.setInit(getStandardFieldConfigs);
+    standardTransformersRegistry.setInit(getStandardTransformers);
+    variableAdapters.setInit(getDefaultVariableAdapters);
+    monacoLanguageRegistry.setInit(getDefaultMonacoLanguages);
 
-    app.config(($locationProvider, $controllerProvider, $compileProvider, $filterProvider, $httpProvider, $provide) => {
-      // pre assing bindings before constructor calls
-      $compileProvider.preAssignBindingsEnabled(true);
+    setQueryRunnerFactory(() => new QueryRunner());
+    setVariableQueryRunner(new VariableQueryRunner());
 
-      if (config.buildInfo.env !== 'development') {
-        $compileProvider.debugInfoEnabled(false);
+    locationUtil.initialize({
+      config,
+      getTimeRangeForUrl: getTimeSrv().timeRangeForUrl,
+      getVariablesUrlParams: getVariablesUrlParams,
+    });
+
+    // intercept anchor clicks and forward it to custom history instead of relying on browser's history
+    document.addEventListener('click', interceptLinkClicks);
+
+    // disable tool tip animation
+    $.fn.tooltip.defaults.animation = false;
+
+    this.angularApp.init();
+
+    // Preload selected app plugins
+    const promises = [];
+    for (const modulePath of config.pluginsToPreload) {
+      promises.push(importPluginModule(modulePath));
+    }
+
+    Promise.all(promises).then(() => {
+      ReactDOM.render(
+        React.createElement(AppWrapper, {
+          app: this,
+        }),
+        document.getElementById('reactRoot')
+      );
+    });
+  }
+}
+
+function initExtensions() {
+  if (extensionsExports.length > 0) {
+    extensionsExports[0].init();
+  }
+}
+
+function initEchoSrv() {
+  setEchoSrv(new Echo({ debug: process.env.NODE_ENV === 'development' }));
+
+  window.addEventListener('load', (e) => {
+    const loadMetricName = 'frontend_boot_load_time_seconds';
+
+    if (performance && performance.getEntriesByType) {
+      performance.mark(loadMetricName);
+
+      const paintMetrics = performance.getEntriesByType('paint');
+
+      for (const metric of paintMetrics) {
+        reportPerformance(
+          `frontend_boot_${metric.name}_time_seconds`,
+          Math.round(metric.startTime + metric.duration) / 1000
+        );
       }
 
-      $httpProvider.useApplyAsync(true);
+      const loadMetric = performance.getEntriesByName(loadMetricName)[0];
+      reportPerformance(loadMetric.name, Math.round(loadMetric.startTime + loadMetric.duration) / 1000);
+    }
+  });
 
-      this.registerFunctions.controller = $controllerProvider.register;
-      this.registerFunctions.directive  = $compileProvider.directive;
-      this.registerFunctions.factory    = $provide.factory;
-      this.registerFunctions.service    = $provide.service;
-      this.registerFunctions.filter     = $filterProvider.register;
+  registerEchoBackend(new PerformanceBackend({}));
 
-      $provide.decorator("$http", ["$delegate", "$templateCache", function($delegate, $templateCache) {
-        var get = $delegate.get;
-        $delegate.get = function(url, config) {
-          if (url.match(/\.html$/)) {
-            // some template's already exist in the cache
-            if (!$templateCache.get(url)) {
-              url += "?v=" + new Date().getTime();
-            }
-          }
-          return get(url, config);
-        };
-        return $delegate;
-      }]);
-    });
+  if (config.sentry.enabled) {
+    registerEchoBackend(
+      new SentryEchoBackend({
+        ...config.sentry,
+        user: config.bootData.user,
+        buildInfo: config.buildInfo,
+      })
+    );
+  }
+}
 
-    this.ngModuleDependencies = [
-      'grafana.core',
-      'ngRoute',
-      'ngSanitize',
-      '$strap.directives',
-      'ang-drag-drop',
-      'grafana',
-      'pasvaz.bindonce',
-      'ui.bootstrap',
-      'ui.bootstrap.tpls',
-    ];
-
-    var module_types = ['controllers', 'directives', 'factories', 'services', 'filters', 'routes'];
-
-    _.each(module_types, type => {
-      var moduleName = 'grafana.' + type;
-      this.useModule(angular.module(moduleName, []));
-    });
-
-    // makes it possible to add dynamic stuff
-    this.useModule(coreModule);
-
-    var preBootRequires = [System.import('app/features/all')];
-
-    Promise.all(preBootRequires).then(() => {
-      // disable tool tip animation
-      $.fn.tooltip.defaults.animation = false;
-      // bootstrap the app
-      angular.bootstrap(document, this.ngModuleDependencies).invoke(() => {
-        _.each(this.preBootModules, module => {
-          _.extend(module, this.registerFunctions);
-        });
-
-        this.preBootModules = null;
-      });
-    }).catch(function(err) {
-      console.log('Application boot failed:', err);
-    });
+function addClassIfNoOverlayScrollbar() {
+  if (getScrollbarWidth() > 0) {
+    document.body.classList.add('no-overlay-scrollbar');
   }
 }
 

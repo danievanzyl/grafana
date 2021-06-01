@@ -3,55 +3,48 @@ package migrations
 import (
 	"testing"
 
-	"github.com/go-xorm/xorm"
 	. "github.com/grafana/grafana/pkg/services/sqlstore/migrator"
 	"github.com/grafana/grafana/pkg/services/sqlstore/sqlutil"
-
-	. "github.com/smartystreets/goconvey/convey"
-	//"github.com/grafana/grafana/pkg/log"
+	"github.com/grafana/grafana/pkg/setting"
+	"github.com/stretchr/testify/require"
+	"xorm.io/xorm"
 )
 
-var indexTypes = []string{"Unknown", "INDEX", "UNIQUE INDEX"}
-
 func TestMigrations(t *testing.T) {
-	//log.NewLogger(0, "console", `{"level": 0}`)
+	testDB := sqlutil.SQLite3TestDB()
+	const query = `select count(*) as count from migration_log`
+	result := struct{ Count int }{}
 
-	testDBs := []sqlutil.TestDB{
-		sqlutil.TestDB_Sqlite3,
-	}
+	x, err := xorm.NewEngine(testDB.DriverName, testDB.ConnStr)
+	require.NoError(t, err)
 
-	for _, testDB := range testDBs {
+	err = NewDialect(x).CleanDB()
+	require.NoError(t, err)
 
-		Convey("Initial "+testDB.DriverName+" migration", t, func() {
-			x, err := xorm.NewEngine(testDB.DriverName, testDB.ConnStr)
-			So(err, ShouldBeNil)
+	_, err = x.SQL(query).Get(&result)
+	require.Error(t, err)
 
-			sqlutil.CleanDB(x)
+	mg := NewMigrator(x, &setting.Cfg{})
+	AddMigrations(mg)
+	expectedMigrations := mg.MigrationsCount()
 
-			mg := NewMigrator(x)
-			AddMigrations(mg)
+	err = mg.Start()
+	require.NoError(t, err)
 
-			err = mg.Start()
-			So(err, ShouldBeNil)
+	has, err := x.SQL(query).Get(&result)
+	require.NoError(t, err)
+	require.True(t, has)
 
-			// tables, err := x.DBMetas()
-			// So(err, ShouldBeNil)
-			//
-			// fmt.Printf("\nDB Schema after migration: table count: %v\n", len(tables))
-			//
-			// for _, table := range tables {
-			// 	fmt.Printf("\nTable: %v \n", table.Name)
-			// 	for _, column := range table.Columns() {
-			// 		fmt.Printf("\t %v \n", column.String(x.Dialect()))
-			// 	}
-			//
-			// 	if len(table.Indexes) > 0 {
-			// 		fmt.Printf("\n\tIndexes:\n")
-			// 		for _, index := range table.Indexes {
-			// 			fmt.Printf("\t %v (%v) %v \n", index.Name, strings.Join(index.Cols, ","), indexTypes[index.Type])
-			// 		}
-			// 	}
-			// }
-		})
-	}
+	require.Equal(t, expectedMigrations, result.Count)
+
+	mg = NewMigrator(x, &setting.Cfg{})
+	AddMigrations(mg)
+
+	err = mg.Start()
+	require.NoError(t, err)
+
+	has, err = x.SQL(query).Get(&result)
+	require.NoError(t, err)
+	require.True(t, has)
+	require.Equal(t, expectedMigrations, result.Count)
 }

@@ -3,9 +3,8 @@ package sqlstore
 import (
 	"time"
 
-	"github.com/go-xorm/xorm"
 	"github.com/grafana/grafana/pkg/bus"
-	m "github.com/grafana/grafana/pkg/models"
+	"github.com/grafana/grafana/pkg/models"
 )
 
 func init() {
@@ -13,21 +12,22 @@ func init() {
 	bus.AddHandler("sql", GetTempUsersQuery)
 	bus.AddHandler("sql", UpdateTempUserStatus)
 	bus.AddHandler("sql", GetTempUserByCode)
+	bus.AddHandler("sql", UpdateTempUserWithEmailSent)
+	bus.AddHandler("sql", ExpireOldUserInvites)
 }
 
-func UpdateTempUserStatus(cmd *m.UpdateTempUserStatusCommand) error {
-	return inTransaction(func(sess *xorm.Session) error {
-		var rawSql = "UPDATE temp_user SET status=? WHERE code=?"
-		_, err := sess.Exec(rawSql, string(cmd.Status), cmd.Code)
+func UpdateTempUserStatus(cmd *models.UpdateTempUserStatusCommand) error {
+	return inTransaction(func(sess *DBSession) error {
+		var rawSQL = "UPDATE temp_user SET status=? WHERE code=?"
+		_, err := sess.Exec(rawSQL, string(cmd.Status), cmd.Code)
 		return err
 	})
 }
 
-func CreateTempUser(cmd *m.CreateTempUserCommand) error {
-	return inTransaction2(func(sess *session) error {
-
+func CreateTempUser(cmd *models.CreateTempUserCommand) error {
+	return inTransaction(func(sess *DBSession) error {
 		// create user
-		user := &m.TempUser{
+		user := &models.TempUser{
 			Email:           cmd.Email,
 			Name:            cmd.Name,
 			OrgId:           cmd.OrgId,
@@ -36,8 +36,9 @@ func CreateTempUser(cmd *m.CreateTempUserCommand) error {
 			Status:          cmd.Status,
 			RemoteAddr:      cmd.RemoteAddr,
 			InvitedByUserId: cmd.InvitedByUserId,
-			Created:         time.Now(),
-			Updated:         time.Now(),
+			EmailSentOn:     time.Now(),
+			Created:         time.Now().Unix(),
+			Updated:         time.Now().Unix(),
 		}
 
 		if _, err := sess.Insert(user); err != nil {
@@ -49,8 +50,21 @@ func CreateTempUser(cmd *m.CreateTempUserCommand) error {
 	})
 }
 
-func GetTempUsersQuery(query *m.GetTempUsersQuery) error {
-	rawSql := `SELECT
+func UpdateTempUserWithEmailSent(cmd *models.UpdateTempUserWithEmailSentCommand) error {
+	return inTransaction(func(sess *DBSession) error {
+		user := &models.TempUser{
+			EmailSent:   true,
+			EmailSentOn: time.Now(),
+		}
+
+		_, err := sess.Where("code = ?", cmd.Code).Cols("email_sent", "email_sent_on").Update(user)
+
+		return err
+	})
+}
+
+func GetTempUsersQuery(query *models.GetTempUsersQuery) error {
+	rawSQL := `SELECT
 	                tu.id             as id,
 	                tu.org_id         as org_id,
 	                tu.email          as email,
@@ -70,25 +84,25 @@ func GetTempUsersQuery(query *m.GetTempUsersQuery) error {
 	params := []interface{}{string(query.Status)}
 
 	if query.OrgId > 0 {
-		rawSql += ` AND tu.org_id=?`
+		rawSQL += ` AND tu.org_id=?`
 		params = append(params, query.OrgId)
 	}
 
 	if query.Email != "" {
-		rawSql += ` AND tu.email=?`
+		rawSQL += ` AND tu.email=?`
 		params = append(params, query.Email)
 	}
 
-	rawSql += " ORDER BY tu.created desc"
+	rawSQL += " ORDER BY tu.created desc"
 
-	query.Result = make([]*m.TempUserDTO, 0)
-	sess := x.Sql(rawSql, params...)
+	query.Result = make([]*models.TempUserDTO, 0)
+	sess := x.SQL(rawSQL, params...)
 	err := sess.Find(&query.Result)
 	return err
 }
 
-func GetTempUserByCode(query *m.GetTempUserByCodeQuery) error {
-	var rawSql = `SELECT
+func GetTempUserByCode(query *models.GetTempUserByCodeQuery) error {
+	var rawSQL = `SELECT
 	                tu.id             as id,
 	                tu.org_id         as org_id,
 	                tu.email          as email,
@@ -106,16 +120,28 @@ func GetTempUserByCode(query *m.GetTempUserByCodeQuery) error {
 									LEFT OUTER JOIN ` + dialect.Quote("user") + ` as u on u.id = tu.invited_by_user_id
 	                WHERE tu.code=?`
 
-	var tempUser m.TempUserDTO
-	sess := x.Sql(rawSql, query.Code)
+	var tempUser models.TempUserDTO
+	sess := x.SQL(rawSQL, query.Code)
 	has, err := sess.Get(&tempUser)
 
 	if err != nil {
 		return err
-	} else if has == false {
-		return m.ErrTempUserNotFound
+	} else if !has {
+		return models.ErrTempUserNotFound
 	}
 
 	query.Result = &tempUser
 	return err
+}
+
+func ExpireOldUserInvites(cmd *models.ExpireTempUsersCommand) error {
+	return inTransaction(func(sess *DBSession) error {
+		var rawSQL = "UPDATE temp_user SET status = ?, updated = ? WHERE created <= ? AND status in (?, ?)"
+		if result, err := sess.Exec(rawSQL, string(models.TmpUserExpired), time.Now().Unix(), cmd.OlderThan.Unix(), string(models.TmpUserSignUpStarted), string(models.TmpUserInvitePending)); err != nil {
+			return err
+		} else if cmd.NumExpired, err = result.RowsAffected(); err != nil {
+			return err
+		}
+		return nil
+	})
 }

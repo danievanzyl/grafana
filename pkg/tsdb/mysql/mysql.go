@@ -1,311 +1,307 @@
 package mysql
 
 import (
-	"context"
-	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"reflect"
 	"strconv"
-	"sync"
-
+	"strings"
 	"time"
 
+	"github.com/VividCortex/mysqlerr"
+	"github.com/grafana/grafana-plugin-sdk-go/data"
+	"github.com/grafana/grafana-plugin-sdk-go/data/sqlutil"
+	"github.com/grafana/grafana/pkg/infra/httpclient"
+	"github.com/grafana/grafana/pkg/setting"
+
 	"github.com/go-sql-driver/mysql"
-	"github.com/go-xorm/core"
-	"github.com/go-xorm/xorm"
-	"github.com/grafana/grafana/pkg/components/null"
-	"github.com/grafana/grafana/pkg/components/simplejson"
-	"github.com/grafana/grafana/pkg/log"
+	"github.com/grafana/grafana/pkg/infra/log"
 	"github.com/grafana/grafana/pkg/models"
-	"github.com/grafana/grafana/pkg/tsdb"
+	"github.com/grafana/grafana/pkg/plugins"
+	"github.com/grafana/grafana/pkg/tsdb/sqleng"
 )
 
-type MysqlExecutor struct {
-	datasource *models.DataSource
-	engine     *xorm.Engine
-	log        log.Logger
+const (
+	dateFormat      = "2006-01-02"
+	dateTimeFormat1 = "2006-01-02 15:04:05"
+	dateTimeFormat2 = "2006-01-02T15:04:05Z"
+)
+
+func characterEscape(s string, escapeChar string) string {
+	return strings.ReplaceAll(s, escapeChar, url.QueryEscape(escapeChar))
 }
 
-type engineCacheType struct {
-	cache    map[int64]*xorm.Engine
-	versions map[int64]int
-	sync.Mutex
-}
+//nolint: staticcheck // plugins.DataPlugin deprecated
+func New(httpClientProvider httpclient.Provider) func(datasource *models.DataSource) (plugins.DataPlugin, error) {
+	//nolint: staticcheck // plugins.DataPlugin deprecated
+	return func(datasource *models.DataSource) (plugins.DataPlugin, error) {
+		logger := log.New("tsdb.mysql")
 
-var engineCache = engineCacheType{
-	cache:    make(map[int64]*xorm.Engine),
-	versions: make(map[int64]int),
-}
-
-func init() {
-	tsdb.RegisterExecutor("mysql", NewMysqlExecutor)
-}
-
-func NewMysqlExecutor(datasource *models.DataSource) (tsdb.Executor, error) {
-	executor := &MysqlExecutor{
-		datasource: datasource,
-		log:        log.New("tsdb.mysql"),
-	}
-
-	err := executor.initEngine()
-	if err != nil {
-		return nil, err
-	}
-
-	return executor, nil
-}
-
-func (e *MysqlExecutor) initEngine() error {
-	engineCache.Lock()
-	defer engineCache.Unlock()
-
-	if engine, present := engineCache.cache[e.datasource.Id]; present {
-		if version, _ := engineCache.versions[e.datasource.Id]; version == e.datasource.Version {
-			e.engine = engine
-			return nil
-		}
-	}
-
-	cnnstr := fmt.Sprintf("%s:%s@%s(%s)/%s?charset=utf8mb4&parseTime=true&loc=UTC", e.datasource.User, e.datasource.Password, "tcp", e.datasource.Url, e.datasource.Database)
-	e.log.Debug("getEngine", "connection", cnnstr)
-
-	engine, err := xorm.NewEngine("mysql", cnnstr)
-	engine.SetMaxOpenConns(10)
-	engine.SetMaxIdleConns(10)
-	if err != nil {
-		return err
-	}
-
-	engineCache.cache[e.datasource.Id] = engine
-	e.engine = engine
-	return nil
-}
-
-func (e *MysqlExecutor) Execute(ctx context.Context, queries tsdb.QuerySlice, context *tsdb.QueryContext) *tsdb.BatchResult {
-	result := &tsdb.BatchResult{
-		QueryResults: make(map[string]*tsdb.QueryResult),
-	}
-
-	macroEngine := NewMysqlMacroEngine(context.TimeRange)
-	session := e.engine.NewSession()
-	defer session.Close()
-	db := session.DB()
-
-	for _, query := range queries {
-		rawSql := query.Model.Get("rawSql").MustString()
-		if rawSql == "" {
-			continue
+		protocol := "tcp"
+		if strings.HasPrefix(datasource.Url, "/") {
+			protocol = "unix"
 		}
 
-		queryResult := &tsdb.QueryResult{Meta: simplejson.New(), RefId: query.RefId}
-		result.QueryResults[query.RefId] = queryResult
+		cnnstr := fmt.Sprintf("%s:%s@%s(%s)/%s?collation=utf8mb4_unicode_ci&parseTime=true&loc=UTC&allowNativePasswords=true",
+			characterEscape(datasource.User, ":"),
+			datasource.DecryptedPassword(),
+			protocol,
+			characterEscape(datasource.Url, ")"),
+			characterEscape(datasource.Database, "?"),
+		)
 
-		rawSql, err := macroEngine.Interpolate(rawSql)
+		tlsConfig, err := datasource.GetTLSConfig(httpClientProvider)
 		if err != nil {
-			queryResult.Error = err
-			continue
+			return nil, err
 		}
 
-		queryResult.Meta.Set("sql", rawSql)
-
-		rows, err := db.Query(rawSql)
-		if err != nil {
-			queryResult.Error = err
-			continue
-		}
-
-		defer rows.Close()
-
-		format := query.Model.Get("format").MustString("time_series")
-
-		switch format {
-		case "time_series":
-			err := e.TransformToTimeSeries(query, rows, queryResult)
-			if err != nil {
-				queryResult.Error = err
-				continue
+		if tlsConfig.RootCAs != nil || len(tlsConfig.Certificates) > 0 {
+			tlsConfigString := fmt.Sprintf("ds%d", datasource.Id)
+			if err := mysql.RegisterTLSConfig(tlsConfigString, tlsConfig); err != nil {
+				return nil, err
 			}
-		case "table":
-			err := e.TransformToTable(query, rows, queryResult)
-			if err != nil {
-				queryResult.Error = err
-				continue
+			cnnstr += "&tls=" + tlsConfigString
+		}
+
+		if datasource.JsonData != nil {
+			timezone, hasTimezone := datasource.JsonData.CheckGet("timezone")
+			if hasTimezone && timezone.MustString() != "" {
+				cnnstr += fmt.Sprintf("&time_zone='%s'", url.QueryEscape(timezone.MustString()))
 			}
 		}
-	}
 
-	return result
+		if setting.Env == setting.Dev {
+			logger.Debug("getEngine", "connection", cnnstr)
+		}
+
+		config := sqleng.DataPluginConfiguration{
+			DriverName:        "mysql",
+			ConnectionString:  cnnstr,
+			Datasource:        datasource,
+			TimeColumnNames:   []string{"time", "time_sec"},
+			MetricColumnTypes: []string{"CHAR", "VARCHAR", "TINYTEXT", "TEXT", "MEDIUMTEXT", "LONGTEXT"},
+		}
+
+		rowTransformer := mysqlQueryResultTransformer{
+			log: logger,
+		}
+
+		return sqleng.NewDataPlugin(config, &rowTransformer, newMysqlMacroEngine(logger), logger)
+	}
 }
 
-func (e MysqlExecutor) TransformToTable(query *tsdb.Query, rows *core.Rows, result *tsdb.QueryResult) error {
-	columnNames, err := rows.Columns()
-	columnCount := len(columnNames)
-
-	if err != nil {
-		return err
-	}
-
-	table := &tsdb.Table{
-		Columns: make([]tsdb.TableColumn, columnCount),
-		Rows:    make([]tsdb.RowValues, 0),
-	}
-
-	for i, name := range columnNames {
-		table.Columns[i].Text = name
-	}
-
-	columnTypes, err := rows.ColumnTypes()
-	if err != nil {
-		return err
-	}
-
-	rowLimit := 1000000
-	rowCount := 0
-
-	for ; rows.Next(); rowCount += 1 {
-		if rowCount > rowLimit {
-			return fmt.Errorf("MySQL query row limit exceeded, limit %d", rowLimit)
-		}
-
-		values, err := e.getTypedRowData(columnTypes, rows)
-		if err != nil {
-			return err
-		}
-
-		table.Rows = append(table.Rows, values)
-	}
-
-	result.Tables = append(result.Tables, table)
-	result.Meta.Set("rowCount", rowCount)
-	return nil
+type mysqlQueryResultTransformer struct {
+	log log.Logger
 }
 
-func (e MysqlExecutor) getTypedRowData(types []*sql.ColumnType, rows *core.Rows) (tsdb.RowValues, error) {
-	values := make([]interface{}, len(types))
-
-	for i, stype := range types {
-		switch stype.DatabaseTypeName() {
-		case mysql.FieldTypeNameVarString:
-			values[i] = new(string)
-		case mysql.FieldTypeNameLongLong:
-			values[i] = new(int64)
-		case mysql.FieldTypeNameDouble:
-			values[i] = new(float64)
-		case mysql.FieldTypeNameDateTime:
-			values[i] = new(time.Time)
-		default:
-			return nil, fmt.Errorf("Database type %s not supported", stype.DatabaseTypeName())
+func (t *mysqlQueryResultTransformer) TransformQueryError(err error) error {
+	var driverErr *mysql.MySQLError
+	if errors.As(err, &driverErr) {
+		if driverErr.Number != mysqlerr.ER_PARSE_ERROR && driverErr.Number != mysqlerr.ER_BAD_FIELD_ERROR &&
+			driverErr.Number != mysqlerr.ER_NO_SUCH_TABLE {
+			t.log.Error("query error", "err", err)
+			return errQueryFailed
 		}
 	}
 
-	if err := rows.Scan(values...); err != nil {
-		return nil, err
-	}
-
-	return values, nil
+	return err
 }
 
-func (e MysqlExecutor) TransformToTimeSeries(query *tsdb.Query, rows *core.Rows, result *tsdb.QueryResult) error {
-	pointsBySeries := make(map[string]*tsdb.TimeSeries)
-	columnNames, err := rows.Columns()
+var errQueryFailed = errors.New("query failed - please inspect Grafana server log for details")
 
-	if err != nil {
-		return err
+func (t *mysqlQueryResultTransformer) GetConverterList() []sqlutil.StringConverter {
+	// For the MySQL driver , we have these possible data types:
+	// https://www.w3schools.com/sql/sql_datatypes.asp#:~:text=In%20MySQL%20there%20are%20three,numeric%2C%20and%20date%20and%20time.
+	// Since by default, we convert all into String, we need only to handle the Numeric data types
+	return []sqlutil.StringConverter{
+		{
+			Name:           "handle DOUBLE",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "DOUBLE",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableFloat64,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := strconv.ParseFloat(*in, 64)
+					if err != nil {
+						return nil, err
+					}
+					return &v, nil
+				},
+			},
+		},
+		{
+			Name:           "handle BIGINT",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "BIGINT",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableInt64,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := strconv.ParseInt(*in, 10, 64)
+					if err != nil {
+						return nil, err
+					}
+					return &v, nil
+				},
+			},
+		},
+		{
+			Name:           "handle DECIMAL",
+			InputScanKind:  reflect.Slice,
+			InputTypeName:  "DECIMAL",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableFloat64,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := strconv.ParseFloat(*in, 64)
+					if err != nil {
+						return nil, err
+					}
+					return &v, nil
+				},
+			},
+		},
+		{
+			Name:           "handle DATETIME",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "DATETIME",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableTime,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := time.Parse(dateTimeFormat1, *in)
+					if err == nil {
+						return &v, nil
+					}
+					v, err = time.Parse(dateTimeFormat2, *in)
+					if err == nil {
+						return &v, nil
+					}
+
+					return nil, err
+				},
+			},
+		},
+		{
+			Name:           "handle DATE",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "DATE",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableTime,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := time.Parse(dateFormat, *in)
+					if err == nil {
+						return &v, nil
+					}
+					v, err = time.Parse(dateTimeFormat1, *in)
+					if err == nil {
+						return &v, nil
+					}
+					v, err = time.Parse(dateTimeFormat2, *in)
+					if err == nil {
+						return &v, nil
+					}
+					return nil, err
+				},
+			},
+		},
+		{
+			Name:           "handle TIMESTAMP",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "TIMESTAMP",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableTime,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := time.Parse(dateTimeFormat1, *in)
+					if err == nil {
+						return &v, nil
+					}
+					v, err = time.Parse(dateTimeFormat2, *in)
+					if err == nil {
+						return &v, nil
+					}
+					return nil, err
+				},
+			},
+		},
+		{
+			Name:           "handle YEAR",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "YEAR",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableInt64,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := strconv.ParseInt(*in, 10, 64)
+					if err != nil {
+						return nil, err
+					}
+					return &v, nil
+				},
+			},
+		},
+		{
+			Name:           "handle INT",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "INT",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableInt64,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := strconv.ParseInt(*in, 10, 64)
+					if err != nil {
+						return nil, err
+					}
+					return &v, nil
+				},
+			},
+		},
+		{
+			Name:           "handle FLOAT",
+			InputScanKind:  reflect.Struct,
+			InputTypeName:  "FLOAT",
+			ConversionFunc: func(in *string) (*string, error) { return in, nil },
+			Replacer: &sqlutil.StringFieldReplacer{
+				OutputFieldType: data.FieldTypeNullableFloat64,
+				ReplaceFunc: func(in *string) (interface{}, error) {
+					if in == nil {
+						return nil, nil
+					}
+					v, err := strconv.ParseFloat(*in, 64)
+					if err != nil {
+						return nil, err
+					}
+					return &v, nil
+				},
+			},
+		},
 	}
-
-	rowData := NewStringStringScan(columnNames)
-	rowLimit := 1000000
-	rowCount := 0
-
-	for ; rows.Next(); rowCount += 1 {
-		if rowCount > rowLimit {
-			return fmt.Errorf("MySQL query row limit exceeded, limit %d", rowLimit)
-		}
-
-		err := rowData.Update(rows.Rows)
-		if err != nil {
-			e.log.Error("MySQL response parsing", "error", err)
-			return fmt.Errorf("MySQL response parsing error %v", err)
-		}
-
-		if rowData.metric == "" {
-			rowData.metric = "Unknown"
-		}
-
-		//e.log.Debug("Rows", "metric", rowData.metric, "time", rowData.time, "value", rowData.value)
-
-		if !rowData.time.Valid {
-			return fmt.Errorf("Found row with no time value")
-		}
-
-		if series, exist := pointsBySeries[rowData.metric]; exist {
-			series.Points = append(series.Points, tsdb.TimePoint{rowData.value, rowData.time})
-		} else {
-			series := &tsdb.TimeSeries{Name: rowData.metric}
-			series.Points = append(series.Points, tsdb.TimePoint{rowData.value, rowData.time})
-			pointsBySeries[rowData.metric] = series
-		}
-	}
-
-	for _, value := range pointsBySeries {
-		result.Series = append(result.Series, value)
-	}
-
-	result.Meta.Set("rowCount", rowCount)
-	return nil
-}
-
-type stringStringScan struct {
-	rowPtrs     []interface{}
-	rowValues   []string
-	columnNames []string
-	columnCount int
-
-	time   null.Float
-	value  null.Float
-	metric string
-}
-
-func NewStringStringScan(columnNames []string) *stringStringScan {
-	s := &stringStringScan{
-		columnCount: len(columnNames),
-		columnNames: columnNames,
-		rowPtrs:     make([]interface{}, len(columnNames)),
-		rowValues:   make([]string, len(columnNames)),
-	}
-
-	for i := 0; i < s.columnCount; i++ {
-		s.rowPtrs[i] = new(sql.RawBytes)
-	}
-
-	return s
-}
-
-func (s *stringStringScan) Update(rows *sql.Rows) error {
-	if err := rows.Scan(s.rowPtrs...); err != nil {
-		return err
-	}
-
-	for i := 0; i < s.columnCount; i++ {
-		if rb, ok := s.rowPtrs[i].(*sql.RawBytes); ok {
-			s.rowValues[i] = string(*rb)
-
-			switch s.columnNames[i] {
-			case "time_sec":
-				if sec, err := strconv.ParseInt(s.rowValues[i], 10, 64); err == nil {
-					s.time = null.FloatFrom(float64(sec * 1000))
-				}
-			case "value":
-				if value, err := strconv.ParseFloat(s.rowValues[i], 64); err == nil {
-					s.value = null.FloatFrom(value)
-				}
-			case "metric":
-				s.metric = s.rowValues[i]
-			}
-
-			*rb = nil // reset pointer to discard current value to avoid a bug
-		} else {
-			return fmt.Errorf("Cannot convert index %d column %s to type *sql.RawBytes", i, s.columnNames[i])
-		}
-	}
-	return nil
 }

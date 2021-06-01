@@ -1,16 +1,12 @@
-///<reference path="../../../headers/common.d.ts" />
-
 export class HeatmapDisplayEditorCtrl {
   panel: any;
   panelCtrl: any;
 
   /** @ngInject */
-  constructor($scope) {
+  constructor($scope: any) {
     $scope.editor = this;
     this.panelCtrl = $scope.ctrl;
     this.panel = this.panelCtrl.panel;
-
-    this.panelCtrl.render();
   }
 }
 
